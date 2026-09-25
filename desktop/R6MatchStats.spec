@@ -14,7 +14,7 @@ APP_VERSION = (STAMPED_VERSION.read_text().strip() if STAMPED_VERSION.is_file()
 
 # The app ships as plain files, because Streamlit runs app.py (and its pages) from disk.
 APP_FILES = ["app.py", "report.py", "download.py", "app_info.py", "parser.py", "metrics_engine.py",
-             "sample_data.py", "icon.png"]
+             "sample_data.py", "icon.png", "team_hub.py", "season_stats.py", "replay_watch.py"]
 datas = [(str(ROOT / "scripts" / name), "scripts") for name in APP_FILES]
 for stamp in ("repo.txt", "version.txt"):
     if (ROOT / "build" / stamp).is_file():
@@ -30,7 +30,7 @@ hiddenimports = (
     + ["webview.platforms.winforms", "webview.platforms.edgechromium", "clr",
        "PIL.ImageGrab"]  # the launcher's smoke test screenshot
     # standard library modules the app files use, which PyInstaller can't see in plain files
-    + ["csv", "dataclasses", "html", "ipaddress", "json", "shutil", "subprocess", "tempfile", "zipfile"]
+    + ["csv", "dataclasses", "html", "ipaddress", "json", "shutil", "subprocess", "tempfile", "zipfile", "sqlite3"]
 )
 
 # the Details tab of the exe's Properties, and the name Task Manager shows (Windows only)

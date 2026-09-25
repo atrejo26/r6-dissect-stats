@@ -26,7 +26,7 @@ APP_VERSION = (_stamped_version.read_text().strip() if _stamped_version.is_file(
 # the Windows app, as attached to each GitHub release by .github/workflows/windows-app.yaml
 WINDOWS_INSTALLER = "R6MatchStats-Setup.exe"
 WINDOWS_ZIP = "R6MatchStats-Windows.zip"  # the portable version: no install, run from any folder
-DEFAULT_REPO = "julio208920/r6-dissect"
+DEFAULT_REPO = "atrejo26/r6-dissect-stats"
 
 
 def github_repo() -> str:

@@ -19,6 +19,7 @@ import streamlit as st
 
 from app_info import APP_NAME, APP_VERSION, is_loopback, is_public_host, is_windows_app
 from metrics_engine import PRO_LEAGUE_COLUMNS, compute_match_metrics, leaderboard_rows, pro_league_rows
+from replay_watch import source_signature
 from parser import (
     ReplayParseError, collect_rec_files, find_replay_folders, group_by_match, load_demo_match,
     parse_match, r6_dissect_available, raw_shape_preview, save_uploads,
@@ -47,7 +48,7 @@ def _load_source(sig, collect) -> dict:
         state["groups"] = group_by_match(collect(Path(workdir)))
         if not state["groups"]:
             state["error"] = "No .rec replay files found."
-    except ReplayParseError as e:
+    except (ReplayParseError, OSError, ValueError) as e:
         state["error"] = str(e)
     st.session_state["source"] = state
     return state
@@ -99,7 +100,14 @@ with st.sidebar:
                "Objectives · Dead for trade kill · Trade kills")
     st.caption(f"{APP_NAME} {APP_VERSION}")
 
+st.caption("RAINBOW SIX SIEGE  /  COMPETITIVE ANALYTICS")
 st.title("Match Report")
+st.caption("Review every round. Build your roster. Track your season.")
+if st.button("Refresh replays", help="Check the replay folder again and retry files that were still being written."):
+    old_source = st.session_state.pop("source", None)
+    if old_source:
+        shutil.rmtree(old_source["workdir"], ignore_errors=True)
+st.session_state.pop("active_match", None)
 
 # ------------------------------------------------------------- input -------
 match = raw = None
@@ -144,7 +152,19 @@ else:
             if not p.exists():
                 st.error(f"Not found: {p}")
             else:
-                picked = (("path", str(p), p.stat().st_mtime), lambda td, c=p: collect_rec_files(c, td))
+                picked = (source_signature(p), lambda td, c=p: collect_rec_files(c, td))
+                if p.is_dir() and st.toggle("Watch replay folder", help="Check for new or changed rounds every 15 seconds while this page is open."):
+                    @st.fragment(run_every=15)
+                    def watch_folder():
+                        try:
+                            current = source_signature(p)
+                            previous = st.session_state.get("source", {}).get("sig")
+                            if previous is not None and current != previous:
+                                st.rerun()
+                            st.caption("Watching replay folder · checks every 15 seconds")
+                        except OSError:
+                            st.warning("Replay folder is temporarily unavailable. Check the path or refresh.")
+                    watch_folder()
     else:
         REPLAYS_DIR.mkdir(exist_ok=True)
         choices = sorted(
@@ -157,7 +177,7 @@ else:
             st.info(f"No matches in `{REPLAYS_DIR}` yet.")
         else:
             chosen = st.selectbox("Match", choices, format_func=lambda p: p.name + ("/" if p.is_dir() else ""))
-            picked = (("path", str(chosen), chosen.stat().st_mtime), lambda td, c=chosen: collect_rec_files(c, td))
+            picked = (source_signature(chosen), lambda td, c=chosen: collect_rec_files(c, td))
 
     if picked is not None:
         state = _load_source(*picked)
@@ -191,6 +211,9 @@ if match is None:
     st.stop()
 
 # ------------------------------------------------------------ compute ------
+st.session_state["active_match"] = match
+st.session_state["active_match_demo"] = demo_mode
+st.session_state["active_match_warnings"] = parse_warnings
 stats = compute_match_metrics(match)
 rows = pro_league_rows(stats)
 team_names = match["team_names"]
@@ -231,6 +254,8 @@ c2.download_button("⬇ JSON", json.dumps({
     "score": score, "players": rows}, indent=2, ensure_ascii=False).encode("utf-8"),
     file_name=f"{match['match_id']}_stats.json", mime="application/json")
 
+st.page_link("team_hub.py", label="Save players and match stats to Team Hub", icon=":material/groups:")
+
 # ------------------------------------------------------------ breakdown ---
 st.subheader("Round-by-round")
 player = st.selectbox("Player", [r["Player"] for r in rows])
@@ -245,7 +270,8 @@ for col, (label, value) in zip(st.columns(3) + st.columns(3), (
 )):
     col.metric(label, value)
 for i, rb in enumerate(s.round_breakdown, 1):
-    st.markdown(f"**{'🟢' if rb.survived else '🔴'} Round {i}** — {rb.summary()}")
+    display_round = rb.round_num + (1 if any(r['round_num'] == 0 for r in match['rounds']) else 0)
+    st.markdown(f"**{'🟢' if rb.survived else '🔴'} Round {display_round}** — {rb.summary()}")
 
 with st.expander("Stat definitions"):
     st.markdown(
