@@ -29,6 +29,11 @@ if (-not ($version -match '^\d+(\.\d+){0,3}$')) {
 }
 Set-Content -Path build\version.txt -Value $version -Encoding ascii
 
+# Hash the exact plain files included in the install. The launcher refuses to
+# execute if a shipped script or replay parser differs from this manifest.
+& $python desktop\integrity.py (Get-Location).Path build\integrity.json
+if ($LASTEXITCODE) { throw "integrity manifest generation failed" }
+
 & $python -m PyInstaller --noconfirm --clean --distpath dist --workpath build\pyinstaller desktop\R6MatchStats.spec
 if ($LASTEXITCODE) { throw "PyInstaller failed" }
 
@@ -61,6 +66,19 @@ if (-not $iscc) {
 }
 & $iscc /Q "/DAppVersion=$version" "/DAppRepo=$repo" desktop\installer.iss
 if ($LASTEXITCODE) { throw "Inno Setup failed" }
+
+# A release build must be checked by an active antivirus engine. This catches
+# known malware; hashes above detect file changes after the build.
+$defender = Get-Command Start-MpScan -ErrorAction SilentlyContinue
+if (-not $defender) { throw "Microsoft Defender scan is unavailable on this build machine" }
+$status = Get-MpComputerStatus
+if (-not $status.AntivirusEnabled) { throw "Microsoft Defender antivirus is disabled" }
+$dist = (Resolve-Path dist).Path
+Start-MpScan -ScanType CustomScan -ScanPath $dist -ErrorAction Stop
+$detections = @(Get-MpThreatDetection | Where-Object {
+    @($_.Resources) | Where-Object { $_ -like "*$dist*" }
+})
+if ($detections.Count) { throw "Defender reported a detection in the build artifacts" }
 
 Write-Host "Built R6 Match Stats $version`:"
 Write-Host "  dist\R6MatchStats-Setup.exe   (installer)"

@@ -91,7 +91,7 @@ import sys
 import tempfile
 import zipfile
 from collections import defaultdict
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
@@ -387,9 +387,16 @@ def extract_zip_recs(zf: zipfile.ZipFile, dest_dir: Path) -> list[str]:
     if sum(m.file_size for m in members) > MAX_ZIP_REPLAY_BYTES:
         raise ReplayParseError("That zip is too large to be match replays.")
     paths = []
+    destinations: set[Path] = set()
     for member in members:
-        src = Path(member.filename)
+        src = PurePosixPath(member.filename.replace("\\", "/"))
+        if (src.is_absolute() or any(part in ("..", ".") for part in src.parts)
+                or ":" in src.parts[0]):
+            raise ReplayParseError(f"Unsafe path in zip: {member.filename}")
         dest = dest_dir / (src.parent.name or "match") / src.name
+        if dest in destinations:
+            raise ReplayParseError(f"Duplicate replay filename in zip: {member.filename}")
+        destinations.add(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
         with zf.open(member) as fsrc, open(dest, "wb") as out:
             shutil.copyfileobj(fsrc, out)

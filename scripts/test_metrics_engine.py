@@ -155,6 +155,15 @@ class TestReplayFiles(unittest.TestCase):
                 with self.assertRaisesRegex(ReplayParseError, "too large"):
                     save_uploads([self.upload("big.zip", big)], Path(td))
 
+    def test_zip_rejects_path_traversal_and_colliding_replays(self):
+        with tempfile.TemporaryDirectory() as td:
+            for name in ("../evil.rec", "C:/evil.rec"):
+                with self.subTest(name=name), self.assertRaisesRegex(ReplayParseError, "Unsafe path"):
+                    save_uploads([self.upload("bad.zip", self.zip_bytes({name: b"x"}))], Path(td))
+            colliding = self.zip_bytes({"A/round.rec": b"a", "B/A/round.rec": b"b"})
+            with self.assertRaisesRegex(ReplayParseError, "Duplicate replay"):
+                save_uploads([self.upload("colliding.zip", colliding)], Path(td))
+
 
 if __name__ == "__main__":
     unittest.main()
