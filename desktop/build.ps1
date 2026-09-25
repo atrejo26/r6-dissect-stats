@@ -22,15 +22,23 @@ $repo = $env:GITHUB_REPOSITORY
 if (-not $repo) { $repo = (git remote get-url origin) -replace '^.*github\.com[:/]', '' -replace '\.git$', '' }
 New-Item -ItemType Directory -Force build | Out-Null
 Set-Content -Path build\repo.txt -Value $repo -Encoding ascii
-# the app's version: $env:R6_VERSION (the release workflow passes the tag), else the one in app_info.py
-$version = $env:R6_VERSION -replace '^[vV]', ''
-if (-not ($version -match '^\d+(\.\d+){0,3}$')) {
+# the app's version: the numbers in $env:R6_VERSION (the release workflow passes the tag,
+# e.g. v1.2.0 or app-v1.2.0), else the one in app_info.py
+$version = [regex]::Match("$env:R6_VERSION", '\d+(\.\d+){0,3}').Value
+if (-not $version) {
     $version = (Select-String -Path scripts\app_info.py -Pattern '"([\d.]+)"\s*$' | Where-Object { $_.Line -match 'APP_VERSION' }).Matches[0].Groups[1].Value
 }
 Set-Content -Path build\version.txt -Value $version -Encoding ascii
+# the notice the installer shows before installing (the same text as the app's About section)
+& $python -c "import sys; sys.path.insert(0, 'scripts'); import app_info; print(app_info.NOTICE + '\n\n' + app_info.HOW_IT_WORKS)" |
+    Set-Content -Path build\notice.txt -Encoding utf8
 
 & $python -m PyInstaller --noconfirm --clean --distpath dist --workpath build\pyinstaller desktop\R6MatchStats.spec
 if ($LASTEXITCODE) { throw "PyInstaller failed" }
+
+# the list of every file and its SHA-256, which the app checks each time it starts (desktop/integrity.py)
+& $python desktop\integrity.py create dist\R6MatchStats
+if ($LASTEXITCODE) { throw "writing the app's file list failed" }
 
 # the portable zip. Python's zipfile, with retries: antivirus can briefly lock the files PyInstaller just wrote
 foreach ($attempt in 1..3) {
@@ -62,6 +70,13 @@ if (-not $iscc) {
 & $iscc /Q "/DAppVersion=$version" "/DAppRepo=$repo" desktop\installer.iss
 if ($LASTEXITCODE) { throw "Inno Setup failed" }
 
+# checksums people can compare their download against (Get-FileHash shows the same value)
+$sums = foreach ($file in "R6MatchStats-Setup.exe", "R6MatchStats-Windows.zip") {
+    "$((Get-FileHash "dist\$file" -Algorithm SHA256).Hash.ToLower())  $file"
+}
+Set-Content -Path dist\SHA256SUMS.txt -Value $sums -Encoding ascii
+
 Write-Host "Built R6 Match Stats $version`:"
 Write-Host "  dist\R6MatchStats-Setup.exe   (installer)"
 Write-Host "  dist\R6MatchStats-Windows.zip (portable)"
+Write-Host "  dist\SHA256SUMS.txt           (checksums of both)"

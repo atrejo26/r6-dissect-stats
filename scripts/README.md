@@ -17,6 +17,10 @@ It comes three ways, all with CSV/JSON export:
   straight from the game's folder,
 - **a command-line tool** (`match_stats.py`).
 
+> R6 Match Stats is an unofficial fan project, free to use. It isn't made,
+> endorsed or supported by Ubisoft. Rainbow Six and Ubisoft are trademarks of
+> Ubisoft Entertainment. See [Ubisoft's terms](#ubisofts-terms).
+
 ## Quick start (Windows)
 
 From the repo root, in PowerShell:
@@ -125,9 +129,10 @@ changing the Go parser. Every push to the branch redeploys the site.
 ### The Windows app (GitHub Releases)
 
 The **Windows app** workflow (`.github/workflows/windows-app.yaml`) builds the
-installer (`R6MatchStats-Setup.exe`) and a portable zip, installs and opens
-the app on a Windows machine to check it works, and attaches both files to
-every published release. The website's download button points at the newest
+installer (`R6MatchStats-Setup.exe`) and a portable zip, runs the tests,
+scans the build with Microsoft Defender, installs and opens the app on a
+Windows machine to check it works, and attaches both files plus their
+checksums (`SHA256SUMS.txt`) to every published release. The website's download button points at the newest
 release that has the installer. Until there is one, the page says the app
 hasn't been published yet.
 
@@ -141,13 +146,68 @@ release is out, and running the new installer updates the app in place.
 
 To build it on your own PC instead, run
 `powershell -ExecutionPolicy Bypass -File desktop\build.ps1`, then drag
-`dist\R6MatchStats-Setup.exe` and `dist\R6MatchStats-Windows.zip` onto a
-release. See [desktop/README.md](../desktop/README.md).
+`dist\R6MatchStats-Setup.exe`, `dist\R6MatchStats-Windows.zip` and
+`dist\SHA256SUMS.txt` onto a release. See [desktop/README.md](../desktop/README.md).
+
+## Safety
+
+- **Only replays get through.** `file_guard.py`'s `ReplayScanner` checks every
+  file before the parser sees it, whether it's uploaded, in a zip or in a
+  folder. A file must be named `.rec`, be a plausible size for one round, and
+  start with the bytes every Siege replay starts with. Anything else, like a
+  renamed program, is skipped and listed on the page, and never even written
+  to disk. Zips and uploads are also capped in file count and total size, and
+  a zip's folder names can't write outside its temporary folder.
+- **The Windows app checks itself.** The build records every file's SHA-256
+  (`desktop/integrity.py`), and each time the app opens it refuses to run if
+  any file was changed, added (say, a planted DLL) or removed. It can't catch
+  someone replacing `R6MatchStats.exe` itself or a DLL Windows loads before
+  the app's code starts. For that, compare the download with the published
+  checksum (the download page shows it) and only download from the official
+  release.
+- **Builds are scanned.** The release workflow scans each build with Microsoft
+  Defender and won't publish one it flags. The app isn't code-signed, which is
+  why Windows SmartScreen warns about it. A code-signing certificate would
+  remove that warning.
+- **Nothing is kept.** The Windows app reads replays in place and never writes
+  to the game's folders. The website keeps uploads only while they're in use
+  and deletes them after an hour unused. Neither stores anyone's stats.
+
+## Ubisoft's terms
+
+This tool is built to stay clear of the Rainbow Six Siege EULA and Ubisoft's
+Terms of Use, but it isn't approved by Ubisoft, and only Ubisoft can say for
+certain what it allows:
+
+- **Not a cheat or a game tool** (EULA 1.2(iii), EULA 4, Terms 7.3.4): it never
+  touches the game while it runs. It doesn't read the game's memory, inject
+  anything, automate input or change game files. It only reads replay files the
+  game already saved, after the match, so it gives no advantage in a match.
+- **Nothing online** (Terms 7.3.5, 7.3.6): it never connects to the game,
+  Ubisoft's servers or anyone's Ubisoft account, and it doesn't scrape or
+  collect data. Each person looks at their own replays.
+- **Non-commercial** (EULA 1.1, 1.2(i), Terms 1.3): it's free, with no ads or paid
+  features. Keep it that way.
+- **No implied endorsement** (EULA 1.3.j) and **Ubisoft's IP** (EULA 2, Terms 9):
+  the app, the installer and this README say it's unofficial and not endorsed.
+  It uses no Ubisoft logos or artwork (the icon is original). It uses
+  Siege's names, such as maps, operators and "R6", only to describe the game's
+  data.
+- **The grey area: reverse engineering** (EULA 1.2(ii)). Reading the `.rec`
+  replay format relies on community reverse-engineering of that format
+  ([r6-dissect](https://github.com/redraskal/r6-dissect)), which the EULA's
+  no-reverse-engineering clause could be read to cover. That the format has
+  been publicly documented for years isn't permission. If you want certainty,
+  ask Ubisoft before publishing widely.
+- **Don't feed replays to AI tools** (Terms 1.3): the Terms forbid using game
+  content as input to AI tools. The app doesn't, but keep that in mind when
+  asking an assistant for help with replay data.
 
 ## Architecture
 
 ```
 .zip / folder / .rec
+   │  file_guard.ReplayScanner                    (only real replays get through)
    │  parser.collect_rec_files + group_by_match   (unzip, split into matches)
    ▼
 r6-dissect (Go CLI, repo root)  →  JSON per round
@@ -176,7 +236,8 @@ players' rounds into SQLite across a season without double-counting. See
 ## Tests
 
 ```bash
-python -m unittest discover -s scripts   # metrics engine, pages, replay files, season stats
+python -m unittest discover -s scripts   # metrics engine, pages, replay files and scanner, season stats
+python -m unittest discover -s desktop   # the Windows app's integrity check
 go test ./...                            # the Go replay parser
 ```
 

@@ -144,6 +144,23 @@ class TestLatestRelease(unittest.TestCase):
         self.assertGreater(app_info.version_tuple("1.10.0"), app_info.version_tuple("1.9.2"))
         self.assertEqual(app_info.version_tuple("1.0"), (1, 0))
 
+    def test_any_tag_style_gives_the_version(self):
+        for tag in ("v1.2.0", "V1.2.0", "app-v1.2.0", "1.2.0", "release-1.2.0"):
+            self.assertEqual(app_info.release_version(tag), "1.2.0", tag)
+        self.assertGreater(app_info.version_tuple("app-v1.2.0"), app_info.version_tuple("1.1.9"))
+
+    def test_published_checksum(self):
+        digest = "a" * 64
+        releases = io.BytesIO(json.dumps([self.release("v2.0.0", "R6MatchStats-Setup.exe", "SHA256SUMS.txt")]).encode())
+        sums = io.BytesIO(f"{digest}  R6MatchStats-Setup.exe\n{'b' * 64}  R6MatchStats-Windows.zip\n".encode())
+        responses = []
+        for body in (releases, sums):
+            response = mock.MagicMock()
+            response.__enter__.return_value = body
+            responses.append(response)
+        with mock.patch("urllib.request.urlopen", side_effect=responses):
+            self.assertEqual(app_info.latest_release("o/r")["sha256"], digest)
+
 
 class TestAppInfo(unittest.TestCase):
     def test_loopback(self):

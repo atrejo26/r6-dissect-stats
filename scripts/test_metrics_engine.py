@@ -10,9 +10,10 @@ import zipfile
 from pathlib import Path
 from unittest import mock
 
-import parser as replay_parser
+import file_guard
 from metrics_engine import PRO_LEAGUE_COLUMNS, compute_match_metrics, pro_league_rows
 from parser import ReplayParseError, collect_rec_files, group_by_match, normalize_from_r6_dissect, save_uploads
+from file_guard import ReplayScanner
 from sample_data import SAMPLE_MATCH
 
 A = ["a1", "a2", "a3", "a4", "a5"]  # team 0
@@ -105,6 +106,11 @@ class TestRoundStats(unittest.TestCase):
         self.assertEqual(sum(p.kills for p in stats.values()), sum(p.deaths for p in stats.values()))
 
 
+# what real replays start with: the current format, and the older zstd-compressed one
+REC = b"dissect\x00" + bytes(2000)
+OLD_REC = b"\x28\xb5\x2f\xfd" + bytes(2000)
+
+
 class TestReplayFiles(unittest.TestCase):
     def test_zip_with_two_matches_and_grouping(self):
         with tempfile.TemporaryDirectory() as td:
@@ -113,12 +119,13 @@ class TestReplayFiles(unittest.TestCase):
             with zipfile.ZipFile(zp, "w") as zf:
                 for m in ("Match-A", "Match-B"):
                     for r in ("R01", "R02"):
-                        zf.writestr(f"{m}/{m}-{r}.rec", b"x")
-                zf.writestr("Match-A/._Match-A-R03.rec", b"x")  # macOS resource fork
+                        zf.writestr(f"{m}/{m}-{r}.rec", REC)
+                zf.writestr("Match-A/._Match-A-R03.rec", REC)  # macOS resource fork
                 zf.writestr("Match-A/notes.txt", b"x")
-            out = td / "out"
-            recs = collect_rec_files(zp, out)
+            scanner = ReplayScanner()
+            recs = collect_rec_files(zp, td / "out", scanner)
             self.assertEqual(len(recs), 4)
+            self.assertEqual(len(scanner.skipped), 2)
             groups = group_by_match(recs)
             self.assertEqual(list(groups), ["Match-A", "Match-B"])
             self.assertEqual([Path(p).name for p in groups["Match-B"]], ["Match-B-R01.rec", "Match-B-R02.rec"])
@@ -138,22 +145,74 @@ class TestReplayFiles(unittest.TestCase):
         return buf.getvalue()
 
     def test_uploads(self):
-        zipped = self.zip_bytes({"Match-A/Match-A-R01.rec": b"x", "Match-B/Match-B-R01.rec": b"y"})
-        uploads = [self.upload("matches.zip", zipped), self.upload("Match-C-R01.rec", b"z"),
+        zipped = self.zip_bytes({"Match-A/Match-A-R01.rec": REC, "Match-B/Match-B-R01.rec": OLD_REC})
+        uploads = [self.upload("matches.zip", zipped), self.upload("Match-C-R01.rec", REC),
                    self.upload("notes.txt", b"ignored")]
         with tempfile.TemporaryDirectory() as td:
             groups = group_by_match(save_uploads(uploads, Path(td)))
             self.assertEqual(list(groups), ["Match-A", "Match-B", "Match-C"])
-            self.assertEqual(Path(groups["Match-C"][0]).read_bytes(), b"z")
+            self.assertEqual(Path(groups["Match-C"][0]).read_bytes(), REC)
+
+    def test_unwanted_files_are_never_extracted(self):
+        zipped = self.zip_bytes({
+            "Match-A/Match-A-R01.rec": REC,
+            "Match-A/Match-A-R02.rec": b"MZ\x90\x00" + bytes(4000),  # a Windows program renamed to .rec
+            "Match-A/run.exe": b"MZ\x90\x00" + bytes(4000),
+            "../../evil/Match-A-R03.rec": REC,  # path traversal: lands safely inside the workdir
+        })
+        with tempfile.TemporaryDirectory() as td:
+            scanner = ReplayScanner()
+            paths = save_uploads([self.upload("m.zip", zipped)], Path(td), scanner)
+            names = sorted(Path(p).name for p in paths)
+            self.assertEqual(names, ["Match-A-R01.rec", "Match-A-R03.rec"])
+            self.assertTrue(all(Path(p).resolve().is_relative_to(Path(td).resolve()) for p in paths))
+            written = sorted(f.name for f in Path(td).rglob("*") if f.is_file())
+            self.assertEqual(written, names)  # the program was never written to disk
+            self.assertEqual({reason for _, reason in scanner.skipped},
+                             {"not a Siege replay (unrecognized contents)", "not a .rec replay file"})
 
     def test_bad_and_oversized_zip_uploads(self):
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(ReplayParseError):
                 save_uploads([self.upload("broken.zip", b"not a zip")], Path(td))
-            big = self.zip_bytes({"Match-A/Match-A-R01.rec": b"x" * 100})
-            with mock.patch.object(replay_parser, "MAX_ZIP_REPLAY_BYTES", 50):
-                with self.assertRaisesRegex(ReplayParseError, "too large"):
+            big = self.zip_bytes({"Match-A/Match-A-R01.rec": REC})
+            with mock.patch.object(file_guard, "MAX_BATCH_BYTES", 50):
+                with self.assertRaisesRegex(ReplayParseError, "too much data"):
                     save_uploads([self.upload("big.zip", big)], Path(td))
+
+    def test_a_single_file_that_is_not_a_replay(self):
+        with tempfile.TemporaryDirectory() as td:
+            fake = Path(td) / "Match-A-R01.rec"
+            fake.write_bytes(b"#!/bin/sh" + bytes(2000))  # a script renamed to .rec
+            with self.assertRaisesRegex(ReplayParseError, "isn't a Siege replay"):
+                collect_rec_files(fake, Path(td) / "out")
+
+
+class TestReplayScanner(unittest.TestCase):
+    def check(self, name, data):
+        return ReplayScanner().check(name, len(data), lambda: io.BytesIO(data))
+
+    def test_accepts_both_replay_formats(self):
+        self.assertTrue(self.check("Match-R01.rec", REC))
+        self.assertTrue(self.check("MATCH-R01.REC", OLD_REC))
+
+    def test_rejects(self):
+        for name, data in [("Match-R01.rec", b"MZ" + bytes(4000)),  # renamed program
+                           ("Match-R01.exe", REC),  # wrong extension
+                           ("._Match-R01.rec", REC),  # macOS metadata
+                           ("Match-R01.rec", b"dissect\x00"),  # too small
+                           ]:
+            self.assertFalse(self.check(name, data), name)
+
+    def test_too_large_is_rejected_without_reading_it(self):
+        opened = mock.MagicMock()
+        self.assertFalse(ReplayScanner().check("Match-R01.rec", file_guard.MAX_REPLAY_BYTES + 1, opened))
+        opened.assert_not_called()
+
+    def test_batch_limits(self):
+        with self.assertRaises(file_guard.ReplayRejected):
+            ReplayScanner.check_batch(file_guard.MAX_BATCH_FILES + 1, 0)
+        ReplayScanner.check_batch(10, 10 * 1024**2)
 
 
 if __name__ == "__main__":

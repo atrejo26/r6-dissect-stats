@@ -82,6 +82,8 @@ isn't installed, so the dashboard is runnable/demoable without it.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import re
@@ -91,8 +93,10 @@ import sys
 import tempfile
 import zipfile
 from collections import defaultdict
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
+
+from file_guard import ReplayRejected, ReplayScanner
 
 
 class ReplayParseError(Exception):
@@ -351,24 +355,27 @@ def parse_match(rec_paths: list[str]) -> tuple[dict[str, Any], dict[str, Any], l
 _ROUND_SUFFIX = re.compile(r"-R\d+$", re.IGNORECASE)
 
 
-def _is_replay(name: str) -> bool:
-    # "._x.rec" files are macOS resource forks, not replays
-    return name.lower().endswith(".rec") and not Path(name).name.startswith("._")
+@contextlib.contextmanager
+def _batch_checks():
+    """Report a batch the scanner refuses as a ReplayParseError."""
+    try:
+        yield
+    except ReplayRejected as e:
+        raise ReplayParseError(str(e)) from e
 
 
-# a full match is ~6-14 MB per round; anything far bigger isn't a match replay
-MAX_ZIP_REPLAY_BYTES = 4 * 1024**3
-
-
-def extract_zip_recs(zf: zipfile.ZipFile, dest_dir: Path) -> list[str]:
-    """Extract only the .rec files, keeping each one's parent folder name so
-    a zip holding several match folders doesn't mix their R01, R02, ... up."""
-    members = [m for m in zf.infolist() if not m.is_dir() and _is_replay(m.filename)]
-    if sum(m.file_size for m in members) > MAX_ZIP_REPLAY_BYTES:
-        raise ReplayParseError("That zip is too large to be match replays.")
+def extract_zip_recs(zf: zipfile.ZipFile, dest_dir: Path, scanner: ReplayScanner | None = None) -> list[str]:
+    """Extract only the replays that pass `scanner`, keeping each one's parent folder
+    name so a zip holding several match folders doesn't mix their R01, R02, ... up."""
+    scanner = scanner or ReplayScanner()
+    members = [m for m in zf.infolist() if not m.is_dir()]
+    with _batch_checks():
+        scanner.check_batch(len(members), sum(m.file_size for m in members))
     paths = []
     for member in members:
-        src = Path(member.filename)
+        if not scanner.check(member.filename, member.file_size, lambda m=member: zf.open(m)):
+            continue
+        src = PurePosixPath(member.filename.replace("\\", "/"))
         dest = dest_dir / (src.parent.name or "match") / src.name
         dest.parent.mkdir(parents=True, exist_ok=True)
         with zf.open(member) as fsrc, open(dest, "wb") as out:
@@ -377,43 +384,54 @@ def extract_zip_recs(zf: zipfile.ZipFile, dest_dir: Path) -> list[str]:
     return sorted(paths)
 
 
-def save_uploads(uploaded, workdir: Path) -> list[str]:
+def _open_zip(source, name: str) -> zipfile.ZipFile:
+    try:
+        return zipfile.ZipFile(source)
+    except zipfile.BadZipFile as e:
+        raise ReplayParseError(f"{name} is not a valid zip file ({e}).") from e
+
+
+def save_uploads(uploaded, workdir: Path, scanner: ReplayScanner | None = None) -> list[str]:
     """.rec paths from uploaded files (Streamlit's UploadedFile, or any BytesIO with
-    a .name): zips are extracted like collect_rec_files does, .rec files are saved."""
+    a .name): zips are extracted like collect_rec_files does, replays are saved.
+    Anything that doesn't pass `scanner` is skipped."""
+    scanner = scanner or ReplayScanner()
+    with _batch_checks():
+        scanner.check_batch(len(uploaded), sum(len(up.getbuffer()) for up in uploaded))
     paths = []
     for up in uploaded:
         name = Path(up.name).name
         if name.lower().endswith(".zip"):
-            try:
-                with zipfile.ZipFile(up) as zf:
-                    paths += extract_zip_recs(zf, workdir / Path(name).stem)
-            except zipfile.BadZipFile as e:
-                raise ReplayParseError(f"{name} is not a valid zip file ({e}).") from e
-        elif _is_replay(name):
+            with _open_zip(up, name) as zf:
+                paths += extract_zip_recs(zf, workdir / Path(name).stem, scanner)
+            continue
+        data = up.getbuffer()
+        if scanner.check(name, len(data), lambda d=data: io.BytesIO(d)):
             dest = workdir / "uploaded" / name
             dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(up.getbuffer())
+            dest.write_bytes(data)
             paths.append(str(dest))
     return paths
 
 
-def collect_rec_files(path: str | Path, workdir: Path) -> list[str]:
+def collect_rec_files(path: str | Path, workdir: Path, scanner: ReplayScanner | None = None) -> list[str]:
     """.rec paths from a match folder (searched recursively), a .zip of one or
-    more match folders (extracted into `workdir`), or a single .rec file."""
+    more match folders (extracted into `workdir`), or a single .rec file.
+    Anything that doesn't pass `scanner` is skipped."""
+    scanner = scanner or ReplayScanner()
     p = Path(path)
     if not p.exists():
         raise ReplayParseError(f"Not found: {p}")
-    if p.is_dir():
-        return sorted(str(f) for f in p.rglob("*") if f.is_file() and _is_replay(f.name))
-    if p.suffix.lower() == ".zip":
-        try:
-            with zipfile.ZipFile(p) as zf:
-                return extract_zip_recs(zf, workdir)
-        except zipfile.BadZipFile as e:
-            raise ReplayParseError(f"{p.name} is not a valid zip file ({e}).") from e
-    if _is_replay(p.name):
-        return [str(p)]
-    raise ReplayParseError(f"{p.name} is not a .rec file, a .zip, or a match folder.")
+    if p.suffix.lower() == ".zip" and p.is_file():
+        with _open_zip(p, p.name) as zf:
+            return extract_zip_recs(zf, workdir, scanner)
+    candidates = [f for f in p.rglob("*.[rR][eE][cC]") if f.is_file()] if p.is_dir() else [p]
+    with _batch_checks():
+        scanner.check_batch(len(candidates), sum(f.stat().st_size for f in candidates))
+    found = sorted(str(f) for f in candidates if scanner.check(f.name, f.stat().st_size, lambda f=f: open(f, "rb")))
+    if not found and not p.is_dir():
+        raise ReplayParseError(f"{p.name} isn't a Siege replay, a .zip, or a match folder.")
+    return found
 
 
 def group_by_match(rec_paths: list[str]) -> dict[str, list[str]]:

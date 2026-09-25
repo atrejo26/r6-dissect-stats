@@ -23,6 +23,7 @@ import tempfile
 from pathlib import Path
 
 from metrics_engine import PRO_LEAGUE_COLUMNS, compute_match_metrics, leaderboard_rows, pro_league_rows
+from file_guard import ReplayScanner
 from parser import ReplayParseError, collect_rec_files, group_by_match, parse_match
 
 
@@ -49,13 +50,16 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.reconfigure(encoding="utf-8")  # player names aren't always ASCII
     results, csv_rows = [], []
     with tempfile.TemporaryDirectory() as td:
+        scanner = ReplayScanner()
         try:
-            matches = group_by_match(collect_rec_files(args.source, Path(td)))
+            matches = group_by_match(collect_rec_files(args.source, Path(td), scanner))
         except ReplayParseError as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
+        if scanner.summary():
+            print(f"warning: {scanner.summary()}", file=sys.stderr)
         if not matches:
-            print("error: no .rec replay files found", file=sys.stderr)
+            print("error: no Siege replay files found", file=sys.stderr)
             return 1
         for name, recs in matches.items():
             try:
