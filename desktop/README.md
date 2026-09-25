@@ -35,6 +35,12 @@ script installs with winget if it's missing. It produces:
 GitHub builds both for every published release with the **Windows app**
 workflow (`.github/workflows/windows-app.yaml`), which also installs the app,
 opens its window, checks that the dashboard shows up in it, and uninstalls it.
+Before that it virus-scans the installer, the zip and every file of the app
+with Microsoft Defender (updated signatures) and stops if anything is found;
+the results and the files' SHA-256 checksums are attached to the release as
+`VirusScan.txt` and added to its notes. Add a `VT_API_KEY` repository secret
+(a free VirusTotal API key) to also scan them with VirusTotal's 70+ engines
+and link to the public reports.
 Set `R6_VERSION` (the workflow passes the release tag) to set the app's
 version; otherwise it's `APP_VERSION` in `scripts/app_info.py`.
 

@@ -2,7 +2,8 @@ name: Windows app
 
 # Builds the Windows app with desktop/build.ps1, tests the installer on a real
 # Windows machine (install, open the app window, uninstall), and attaches
-# R6MatchStats-Setup.exe and R6MatchStats-Windows.zip to each published release.
+# R6MatchStats-Setup.exe and R6MatchStats-Windows.zip to each published release,
+# after a virus scan whose results (VirusScan.txt) are attached too.
 # The website's download button points at the newest release that has them.
 on:
   release:
@@ -21,6 +22,8 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      R6_VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -31,9 +34,51 @@ jobs:
           python-version: "3.12"
       - name: Build
         shell: pwsh
-        env:
-          R6_VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || '' }}
         run: ./desktop/build.ps1
+
+      - name: Virus scan
+        # Scans the installer, the portable zip and every file of the app with Microsoft
+        # Defender (fresh signatures) and fails the build if anything is detected.
+        # VirusScan.txt (results + SHA-256 checksums) goes on the release so users can
+        # check their download. With a VT_API_KEY secret, the installer and zip are also
+        # sent to VirusTotal (70+ engines) and the report links to their public results.
+        shell: pwsh
+        env:
+          VT_API_KEY: ${{ secrets.VT_API_KEY }}
+        run: |
+          Update-MpSignature -ErrorAction SilentlyContinue
+          $mp = Get-MpComputerStatus
+          $defender = "$env:ProgramFiles\Windows Defender\MpCmdRun.exe"
+          $assets = 'dist\R6MatchStats-Setup.exe', 'dist\R6MatchStats-Windows.zip'
+          $lines = @()
+          foreach ($path in $assets + 'dist\R6MatchStats') {
+            $out = & $defender -Scan -ScanType 3 -File (Resolve-Path $path) -DisableRemediation 2>&1
+            $code = $LASTEXITCODE
+            $out
+            if ($code -eq 2) { throw "Microsoft Defender detected a threat in $path" }
+            if ($code) { throw "Microsoft Defender couldn't scan $path (exit code $code)" }
+            $lines += "  $(Split-Path $path -Leaf): no threats found"
+          }
+          $report = @(
+            "R6 Match Stats $env:R6_VERSION - virus scan",
+            "",
+            "Microsoft Defender (engine $($mp.AMEngineVersion), signatures $($mp.AntivirusSignatureVersion), updated $($mp.AntivirusSignatureLastUpdated.ToString('yyyy-MM-dd')))"
+          ) + $lines + @("", "SHA-256 checksums (compare with Get-FileHash <file> in PowerShell):")
+          foreach ($path in $assets) {
+            $report += "  $((Get-FileHash $path -Algorithm SHA256).Hash.ToLower())  $(Split-Path $path -Leaf)"
+          }
+          if ($env:VT_API_KEY) {
+            $report += "", "VirusTotal:"
+            foreach ($path in $assets) {
+              $url = (Invoke-RestMethod https://www.virustotal.com/api/v3/files/upload_url -Headers @{ 'x-apikey' = $env:VT_API_KEY }).data
+              curl.exe -sSf --request POST --url $url --header "x-apikey: $env:VT_API_KEY" --form "file=@$path" | Out-Null
+              if ($LASTEXITCODE) { throw "uploading $path to VirusTotal failed" }
+              $hash = (Get-FileHash $path -Algorithm SHA256).Hash.ToLower()
+              $report += "  $(Split-Path $path -Leaf): https://www.virustotal.com/gui/file/$hash"
+            }
+          }
+          $report | Set-Content dist\VirusScan.txt -Encoding utf8
+          Get-Content dist\VirusScan.txt
 
       - name: Install
         shell: pwsh
@@ -81,6 +126,7 @@ jobs:
           path: |
             dist/R6MatchStats-Setup.exe
             dist/R6MatchStats-Windows.zip
+            dist/VirusScan.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -95,4 +141,14 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" dist/R6MatchStats-Setup.exe dist/R6MatchStats-Windows.zip --clobber
+        run: |
+          $tag = "${{ github.event.release.tag_name }}"
+          gh release upload $tag dist/R6MatchStats-Setup.exe dist/R6MatchStats-Windows.zip dist/VirusScan.txt --clobber
+          if ($LASTEXITCODE) { throw "uploading to the release failed" }
+          # add the scan results to the release notes (once)
+          $notes = (gh release view $tag --json body --jq .body) -join "`n"
+          if ($notes -notmatch '## Virus scan') {
+            $scan = (Get-Content dist\VirusScan.txt | Select-Object -Skip 2) -join "`n"
+            "$notes`n`n## Virus scan`n`n``````n$scan`n``````" | Set-Content notes.md -Encoding utf8
+            gh release edit $tag --notes-file notes.md
+          }
