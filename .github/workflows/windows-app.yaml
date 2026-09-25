@@ -4,6 +4,8 @@ name: Windows app
 # Windows machine (install, open the app window, uninstall), and attaches
 # R6MatchStats-Setup.exe and R6MatchStats-Windows.zip to each published release,
 # after a virus scan whose results (VirusScan.txt) are attached too.
+# R6MatchStats-Setup.exe, R6MatchStats-Windows.zip and their SHA256SUMS.txt to each
+# published release, after a Microsoft Defender scan.
 # The website's download button points at the newest release that has them.
 on:
   release:
@@ -55,6 +57,32 @@ jobs:
         env:
           VT_API_KEY: ${{ secrets.VT_API_KEY }}
         run: ./desktop/scan-release.ps1
+      - name: Test
+        shell: pwsh
+        run: |
+          python -m unittest discover -s scripts
+          if ($LASTEXITCODE) { throw "app tests failed" }
+          python -m unittest discover -s desktop
+          if ($LASTEXITCODE) { throw "integrity tests failed" }
+          python desktop\integrity.py verify dist\R6MatchStats
+          if ($LASTEXITCODE) { throw "the built app doesn't match its own file list" }
+
+      - name: Scan with Microsoft Defender
+        shell: pwsh
+        run: |
+          $mp = "$env:ProgramFiles\Windows Defender\MpCmdRun.exe"
+          if (-not (Test-Path $mp) -or -not (Get-MpComputerStatus -ErrorAction SilentlyContinue).AntivirusEnabled) {
+            Write-Host "::warning::Microsoft Defender isn't running on this machine; skipping the scan"
+            exit 0
+          }
+          & $mp -SignatureUpdate | Out-Host
+          # exit codes don't tell a failed scan from a detection, so read the verdict line instead
+          $out = (& $mp -Scan -ScanType 3 -File "$PWD\dist" -DisableRemediation) -join "`n"
+          $out
+          if ($out -match 'found no threats') { "No threats found." }
+          elseif ($out -match 'found \d+ threat') { throw "Microsoft Defender flagged a file in the build; not publishing it" }
+          else { Write-Host "::warning::The Defender scan didn't finish (exit code $LASTEXITCODE)" }
+          exit 0
 
       - name: Install
         shell: pwsh
@@ -131,3 +159,4 @@ jobs:
           @($notes, '', '## Virus scan', '', $fence, $scan, $fence) | Set-Content notes.md -Encoding utf8
           gh release edit $tag --notes-file notes.md
           if ($LASTEXITCODE) { throw "updating release notes failed" }
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/R6MatchStats-Setup.exe dist/R6MatchStats-Windows.zip dist/SHA256SUMS.txt --clobber
