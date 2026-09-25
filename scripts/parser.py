@@ -58,17 +58,22 @@ a display string will render the whole dict. This module extracts
 `.get("name")` from all four.
 
 `matchFeedback` is consumed in array order, which is r6-dissect's own
-chronological append order; `timeInSeconds` is kept only for display and
-for bounding the trade-detection window (via absolute time delta), since
-whether that clock counts up or down is not confirmed and array order is
-the reliable chronological signal.
+chronological append order. The in-game clock (`timeInSeconds`) counts
+down and resets when the defuser is planted, so each normalized event also
+gets a monotonic `elapsed` (seconds since the round's first event), which
+metrics_engine.py uses for trade windows.
 
-When present, per-round `stats` (kills/deaths/assists/headshots/clutch
-size) come directly from r6-dissect's own computation and are trusted as
-authoritative in metrics_engine.py, overriding what we'd otherwise derive
-by replaying `matchFeedback` ourselves. `matchFeedback` is still needed to
-derive entry kills/deaths, trades, and plant/defuse credit, none of which
-appear in `stats`.
+Per-round `stats` are only used for assists (read from the scoreboard,
+which the kill feed can't provide); everything else is derived from
+`matchFeedback` so team kills and the round winner are handled one way.
+
+Newer replays (Y11S3) don't record who planted or disabled the defuser, so
+those events can arrive with no username; metrics_engine.py credits them
+only when exactly one player on the acting side was alive.
+
+`parse_match` takes the round files of one match; `collect_rec_files` and
+`group_by_match` turn a folder, a .zip, or a whole MatchReplay directory
+into per-match lists of round files first.
 
 Falls back to a bundled synthetic sample match (sample_data.py) if the CLI
 isn't installed, so the dashboard is runnable/demoable without it.
@@ -81,7 +86,10 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
+import zipfile
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -92,12 +100,14 @@ class ReplayParseError(Exception):
 
 def _find_r6_dissect() -> str | None:
     """Locate the CLI: $R6_DISSECT_BIN, then PATH, then the binary built at
-    this repo's root (`go build` there), then `go install`'s default dir."""
+    this repo's root (`go build`), then `go install`'s default dir."""
+    exe = "r6-dissect.exe" if sys.platform == "win32" else "r6-dissect"
+    repo_root = Path(__file__).resolve().parent.parent
     candidates = [
         os.environ.get("R6_DISSECT_BIN"),
         shutil.which("r6-dissect"),
-        str(Path(__file__).resolve().parent.parent / "r6-dissect"),
-        str(Path.home() / "go" / "bin" / "r6-dissect"),
+        str(repo_root / exe),
+        str(Path.home() / "go" / "bin" / exe),
     ]
     for c in candidates:
         if c and Path(c).is_file() and os.access(c, os.X_OK):
@@ -131,7 +141,9 @@ def _run_r6_dissect(rec_path: Path, num_rounds: int = 1) -> dict[str, Any]:
         cmd = [R6_DISSECT_BIN, str(rec_path), "-o", str(out_path)]
         timeout = 60 + _SECONDS_PER_ROUND * num_rounds
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout
+            )
         except subprocess.TimeoutExpired:
             raise ReplayParseError(f"r6-dissect timed out after {timeout}s on {rec_path.name}.")
         if proc.returncode != 0:
@@ -139,7 +151,7 @@ def _run_r6_dissect(rec_path: Path, num_rounds: int = 1) -> dict[str, Any]:
             raise ReplayParseError(f"r6-dissect failed on {label}: {_ANSI.sub('', proc.stderr).strip()}")
         if not out_path.exists():
             raise ReplayParseError("r6-dissect produced no output file.")
-        return json.loads(out_path.read_text())
+        return json.loads(out_path.read_text(encoding="utf-8"))
 
 
 def _extract_name(field: Any, default: str = "") -> str:
@@ -161,65 +173,62 @@ def _display_map_name(name: str) -> str:
 
 
 def _normalize_round(rs: dict[str, Any], idx: int) -> dict[str, Any]:
-    teams = rs.get("teams") or [{}, {}]
-    winner_team = 0
+    teams = (rs.get("teams") or [])[:2]
+    winner_team = None
     win_condition = "unknown"
-    for i, t in enumerate(teams[:2]):
-        if t.get("won"):
+    attack_team = None
+    for i, t in enumerate(teams):
+        if t.get("won") and winner_team is None:
             winner_team = i
-            win_condition = t.get("winCondition", "unknown")
-            break
+            win_condition = t.get("winCondition") or "unknown"
+        if t.get("role") == "Attack":
+            attack_team = i
 
+    # The in-game clock counts down and resets when the defuser is planted, so
+    # derive a monotonic "elapsed" (seconds since the first event) for trade windows.
     events: list[dict[str, Any]] = []
+    elapsed, prev_clock = 0.0, None
+
+    def add(etype: str, clock: float, actor: str | None, **extra: Any) -> None:
+        events.append({"type": etype, "time": clock, "elapsed": elapsed, "actor": actor, **extra})
+
     for fb in rs.get("matchFeedback") or []:
         ftype = _extract_name(fb.get("type"))  # serialized as {"name": ..., "id": ...}
-        t = fb.get("timeInSeconds", 0.0)
+        clock = float(fb.get("timeInSeconds") or 0.0)
+        if prev_clock is not None and clock <= prev_clock:
+            elapsed += prev_clock - clock
+        prev_clock = clock
+        actor = fb.get("username") or None
         if ftype == "Kill":
-            killer, victim = fb.get("username"), fb.get("target")
-            if killer:
-                events.append({
-                    "type": "kill", "time": t, "actor": killer, "target": victim,
-                    "headshot": bool(fb.get("headshot", False)),
-                })
+            victim = fb.get("target")
+            if actor:
+                add("kill", clock, actor, target=victim, headshot=bool(fb.get("headshot")))
             if victim:
-                events.append({"type": "death", "time": t, "actor": victim, "killed_by": killer})
-        elif ftype == "Death":
-            # environmental / no-attributed-killer death (fall, bleed-out, etc.)
-            victim = fb.get("username")
-            if victim:
-                events.append({"type": "death", "time": t, "actor": victim, "killed_by": None})
+                add("death", clock, victim, killed_by=actor)
+        elif ftype == "Death" and actor:
+            # no attributed killer: fall damage, own gadget, bleed-out...
+            add("death", clock, actor, killed_by=None)
         elif ftype == "DefuserPlantComplete":
-            actor = fb.get("username")
-            if actor:
-                events.append({"type": "plant", "time": t, "actor": actor})
+            add("plant", clock, actor)  # actor is None when the replay doesn't say who
         elif ftype == "DefuserDisableComplete":
-            actor = fb.get("username")
-            if actor:
-                events.append({"type": "defuse", "time": t, "actor": actor})
+            add("defuse", clock, actor)
         # OperatorSwap / Battleye / PlayerLeave / LocateObjective / Other: not needed for metrics
 
-    round_stats = {}
-    for s in (rs.get("stats") or []):
-        uname = s.get("username")
-        if not uname:
-            continue
-        round_stats[uname] = {
-            "kills": s.get("kills", 0),
-            "died": bool(s.get("died", False)),
-            "assists": s.get("assists", 0),
-            "headshots": s.get("headshots", 0),
-            "onevx": s.get("1vX", 0),
-        }
+    round_stats = {
+        s["username"]: {"assists": s.get("assists", 0)}
+        for s in rs.get("stats") or [] if s.get("username")
+    }
 
     return {
-        "round_num": rs.get("roundNumber", idx + 1),
+        "round_num": rs.get("roundNumber", idx + 1),  # season_stats' dedupe key: keep as-is
         # who was actually in this round -- players leave/rejoin in long matches
         "players": [p["username"] for p in (rs.get("players") or []) if p.get("username")],
-        "winner_team": winner_team,
+        "winner_team": winner_team,  # None if the replay doesn't record a winner
         "win_condition": win_condition,
+        "attack_team": attack_team,
         "site": rs.get("site", ""),
         "events": events,                    # matchFeedback array order == chronological
-        "round_stats": round_stats or None,  # authoritative per-round stats, if present
+        "round_stats": round_stats or None,  # r6-dissect's scoreboard assists, if present
     }
 
 
@@ -284,35 +293,48 @@ def parse_replay(rec_file_path: str) -> tuple[dict[str, Any], dict[str, Any]]:
     return normalize_from_r6_dissect(raw), raw
 
 
+def _stage_match_folder(paths: list[Path], folder: Path) -> Path:
+    """r6-dissect reads a whole match from one folder. Use the rounds' own
+    folder when it holds exactly these files; otherwise hard-link (or copy)
+    them into `folder`. Symlinks need admin rights on Windows, so they're avoided."""
+    parent = paths[0].parent
+    if all(p.parent == parent for p in paths) and {p.name for p in parent.glob("*.rec")} == {p.name for p in paths}:
+        return parent
+    for p in paths:
+        dest = folder / p.name
+        try:
+            os.link(p, dest)
+        except OSError:
+            shutil.copyfile(p, dest)
+    return folder
+
+
 def parse_match(rec_paths: list[str]) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
     """Parse a whole match (one .rec per round) -> (MatchData, raw JSON,
     warnings). The files are handed to r6-dissect as one folder, which it
     reads in filename order (R01, R02, ...). If a single corrupt/unsupported
     round makes that fail, each round is parsed on its own instead and the
     bad ones are skipped, so one broken file doesn't lose the whole match."""
-    paths = [Path(p) for p in rec_paths]
+    paths = sorted((Path(p) for p in rec_paths), key=lambda p: p.name)
+    if not paths:
+        raise ReplayParseError("No .rec files to parse.")
     missing = [str(p) for p in paths if not p.exists()]
     if missing:
         raise ReplayParseError(f"File(s) not found: {', '.join(missing)}")
-    if not paths:
-        raise ReplayParseError("No .rec files to parse.")
     if len(paths) == 1:
         match, raw = parse_replay(str(paths[0]))
         return match, raw, []
 
     warnings: list[str] = []
     with tempfile.TemporaryDirectory() as td:
-        folder = Path(td)
-        for p in paths:
-            (folder / p.name).symlink_to(p.resolve())
         try:
-            raw = _run_r6_dissect(folder, num_rounds=len(paths))
+            raw = _run_r6_dissect(_stage_match_folder(paths, Path(td)), num_rounds=len(paths))
             return normalize_from_r6_dissect(raw), raw, warnings
-        except ReplayParseError as e:
+        except (ReplayParseError, json.JSONDecodeError) as e:
             warnings.append(f"Whole-match parse failed, parsing rounds individually. ({e})")
 
     rounds = []
-    for p in sorted(paths, key=lambda p: p.name):
+    for p in paths:
         try:
             rounds.append(_run_r6_dissect(p))
         except (ReplayParseError, json.JSONDecodeError) as e:
@@ -321,6 +343,64 @@ def parse_match(rec_paths: list[str]) -> tuple[dict[str, Any], dict[str, Any], l
         raise ReplayParseError("Every round failed to parse:\n" + "\n".join(warnings))
     raw = {"rounds": rounds}
     return normalize_from_r6_dissect(raw), raw, warnings
+
+
+# ------------------------------------------------------ replay file input --
+
+_ROUND_SUFFIX = re.compile(r"-R\d+$", re.IGNORECASE)
+
+
+def _is_replay(name: str) -> bool:
+    # "._x.rec" files are macOS resource forks, not replays
+    return name.lower().endswith(".rec") and not Path(name).name.startswith("._")
+
+
+def extract_zip_recs(zf: zipfile.ZipFile, dest_dir: Path) -> list[str]:
+    """Extract only the .rec files, keeping each one's parent folder name so
+    a zip holding several match folders doesn't mix their R01, R02, ... up."""
+    paths = []
+    for member in zf.infolist():
+        if member.is_dir() or not _is_replay(member.filename):
+            continue
+        src = Path(member.filename)
+        dest = dest_dir / (src.parent.name or "match") / src.name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with zf.open(member) as fsrc, open(dest, "wb") as out:
+            shutil.copyfileobj(fsrc, out)
+        paths.append(str(dest))
+    return sorted(paths)
+
+
+def collect_rec_files(path: str | Path, workdir: Path) -> list[str]:
+    """.rec paths from a match folder (searched recursively), a .zip of one or
+    more match folders (extracted into `workdir`), or a single .rec file."""
+    p = Path(path)
+    if not p.exists():
+        raise ReplayParseError(f"Not found: {p}")
+    if p.is_dir():
+        return sorted(str(f) for f in p.rglob("*") if f.is_file() and _is_replay(f.name))
+    if p.suffix.lower() == ".zip":
+        try:
+            with zipfile.ZipFile(p) as zf:
+                return extract_zip_recs(zf, workdir)
+        except zipfile.BadZipFile as e:
+            raise ReplayParseError(f"{p.name} is not a valid zip file ({e}).") from e
+    if _is_replay(p.name):
+        return [str(p)]
+    raise ReplayParseError(f"{p.name} is not a .rec file, a .zip, or a match folder.")
+
+
+def group_by_match(rec_paths: list[str]) -> dict[str, list[str]]:
+    """Split .rec paths into matches: {"Match-2026-09-23_19-19-11-23660": [R01, R02, ...]}.
+    Round files are named <match>-R01.rec; anything else is grouped by its folder."""
+    groups: dict[str, list[str]] = defaultdict(list)
+    for rp in rec_paths:
+        p = Path(rp)
+        key = _ROUND_SUFFIX.sub("", p.stem)
+        if key == p.stem:  # not a round file name: fall back to the folder
+            key = p.parent.name or p.stem
+        groups[key].append(rp)
+    return {k: sorted(v, key=lambda x: Path(x).name) for k, v in sorted(groups.items())}
 
 
 def load_demo_match() -> dict[str, Any]:

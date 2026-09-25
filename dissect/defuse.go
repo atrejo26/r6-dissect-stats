@@ -43,9 +43,15 @@ func readDefuserTimer(r *Reader) error {
 		a = DefuserPlantComplete
 		r.planted = true
 	}
+	// Newer replays (seen on Y11S3) no longer carry the player ID in the defuser packet,
+	// so the player can be unknown. Leave the username empty rather than guessing.
+	username := ""
+	if r.lastDefuserPlayerIndex > -1 {
+		username = r.Header.Players[r.lastDefuserPlayerIndex].Username
+	}
 	u := MatchUpdate{
 		Type:          a,
-		Username:      r.Header.Players[r.lastDefuserPlayerIndex].Username,
+		Username:      username,
 		Time:          r.timeRaw,
 		TimeInSeconds: r.time,
 	}

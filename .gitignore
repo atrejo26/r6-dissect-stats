@@ -35,3 +35,7 @@
 /.streamlit/app.log
 # Season stats database (scripts/season_stats.py)
 /data/
+# Python
+__pycache__/
+*.pyc
+/.venv/
