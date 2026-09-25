@@ -51,6 +51,13 @@ class TestReportPage(unittest.TestCase):
         at = run_app(R6_DESKTOP="1")
         self.assertEqual(at.radio[0].options, ["Folder or zip on this computer", "Upload"])
 
+    def test_demo_match_can_be_downloaded_as_csv_json_and_txt(self):
+        at = run_app(R6_HOSTED="1")
+        at.toggle[0].set_value(True).run()
+        buttons = at.get("download_button")
+        self.assertEqual([b.proto.label for b in buttons], ["⬇ CSV", "⬇ JSON", "⬇ TXT"])
+        self.assertEqual([Path(b.proto.url).suffix for b in buttons], [".csv", ".json", ".txt"])
+
     def test_demo_match_renders_both_scoreboards(self):
         at = run_app(R6_HOSTED="1")
         at.toggle[0].set_value(True).run()

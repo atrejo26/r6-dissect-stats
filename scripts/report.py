@@ -17,12 +17,13 @@ import threading
 import time
 from pathlib import Path
 
-import pandas as pd
 import streamlit as st
 
 from app_info import APP_NAME, APP_VERSION, NOTICE, is_loopback, is_public_host, is_windows_app
 from file_guard import ReplayScanner
-from metrics_engine import PRO_LEAGUE_COLUMNS, compute_match_metrics, leaderboard_rows, pro_league_rows
+from metrics_engine import (
+    PRO_LEAGUE_COLUMNS, compute_match_metrics, leaderboard_rows, pro_league_rows, rows_csv, scoreboard_text,
+)
 from parser import (
     ReplayParseError, collect_rec_files, find_replay_folders, group_by_match, load_demo_match,
     parse_match, r6_dissect_available, raw_shape_preview, save_uploads,
@@ -263,15 +264,16 @@ for team_idx, team_name in enumerate(team_names[:2]):
         won = score[team_idx] > score[1 - team_idx]
         st.markdown(scoreboard_html(team_name, won, team_rows), unsafe_allow_html=True)
 
-numeric = pd.DataFrame(leaderboard_rows(stats))
-numeric.insert(1, "Team Name", [team_names[t] for t in numeric["Team"]])
-c1, c2, _ = st.columns([1, 1, 2])
-c1.download_button("⬇ CSV", numeric.to_csv(index=False).encode("utf-8"),
+c1, c2, c3, _ = st.columns([1, 1, 1, 3])
+c1.download_button("⬇ CSV", rows_csv([{"Player": r["Player"], "Team Name": team_names[r["Team"]], **r}
+                                       for r in leaderboard_rows(stats)]).encode("utf-8"),
                    file_name=f"{match['match_id']}_stats.csv", mime="text/csv")
 c2.download_button("⬇ JSON", json.dumps({
     "map": match["map"], "match_id": match["match_id"], "teams": team_names,
     "score": score, "players": rows}, indent=2, ensure_ascii=False).encode("utf-8"),
     file_name=f"{match['match_id']}_stats.json", mime="application/json")
+c3.download_button("⬇ TXT", (scoreboard_text(match, rows) + "\n").encode("utf-8"),
+                   file_name=f"{match['match_id']}_stats.txt", mime="text/plain")
 
 # ------------------------------------------------------------ breakdown ---
 st.subheader("Round-by-round")

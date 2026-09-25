@@ -24,7 +24,7 @@ From the repo root, in PowerShell:
 powershell -ExecutionPolicy Bypass -File desktop\build.ps1
 ```
 
-This needs Python 3.10+ (it uses `.venv` if there is one), Go 1.23+ (or an
+This needs Python 3.12+ (it uses `.venv` if there is one), Go 1.23+ (or an
 already built `r6-dissect.exe` at the repo root) and Inno Setup 6, which the
 script installs with winget if it's missing. It produces:
 

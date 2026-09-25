@@ -9,7 +9,7 @@ League-style scoreboard**: one row per player, split by team, with the same
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | Player1 | 116 | 8-2 (+6) | 4-0 (+4) | 100% | 1.14 | 62% | 71% | 0 | 1 | 0 | 1 | 0 |
 
-It comes three ways, all with CSV/JSON export:
+It comes three ways, all with CSV, JSON and TXT export:
 
 - **a website** (`app.py`, a Streamlit app you can host for free),
 - **a Windows app** (`R6MatchStats-Setup.exe`, built from `desktop/`) with its
@@ -60,7 +60,7 @@ On the public website only **Upload** is offered: folder paths would read the
 web server's disk, so they're only available to someone on the same computer
 as the app.
 
-Below the scoreboards you'll find CSV/JSON downloads and a round-by-round
+Below the scoreboards you'll find CSV, JSON and TXT downloads and a round-by-round
 breakdown for each player. The **Use demo match** toggle loads a built-in
 sample match, so you can try the dashboard without a replay. The **Get the
 Windows app** page has the download button and install steps.
@@ -68,12 +68,14 @@ Windows app** page has the download button and install steps.
 ## Command line
 
 ```
-python match_stats.py SOURCE [--csv stats.csv] [--json stats.json]
+python match_stats.py SOURCE [--csv stats.csv] [--json stats.json] [--txt stats.txt]
 ```
 
 `SOURCE` is a `.zip`, a match folder, a single `.rec`, or a folder of many
-matches (each one gets its own scoreboard). `--csv` writes the numeric stats
-(one row per player per match), and `--json` writes the scoreboards.
+matches (each one gets its own scoreboard; up to four are parsed at once).
+`--csv` writes the numeric stats (one row per player per match), `--json`
+writes the scoreboards, and `--txt` writes the scoreboards as plain text,
+exactly as printed. Use any of them together, or none to just print.
 
 ## Stat definitions
 
@@ -123,8 +125,9 @@ download button automatically points at the fork's releases.
 4. Under **Advanced settings**, choose Python 3.13, then click **Deploy**.
 
 It uses the Linux `r6-dissect` binary committed at the repo root, so rebuild
-and commit it (`GOOS=linux GOARCH=amd64 go build -o r6-dissect .`) after
-changing the Go parser. Every push to the branch redeploys the site.
+and commit it (`GOOS=linux GOARCH=amd64 go build -trimpath -o r6-dissect .`;
+`-trimpath` keeps your PC's folder paths out of it) after changing the Go
+parser. Every push to the branch redeploys the site.
 
 ### The Windows app (GitHub Releases)
 
@@ -236,7 +239,7 @@ players' rounds into SQLite across a season without double-counting. See
 ## Tests
 
 ```bash
-python -m unittest discover -s scripts   # metrics engine, pages, replay files and scanner, season stats
+python -m unittest discover -s scripts   # metrics engine, pages, command line, replay files and scanner, season stats
 python -m unittest discover -s desktop   # the Windows app's integrity check
 go test ./...                            # the Go replay parser
 ```

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -42,6 +45,16 @@ class TestAppIntegrity(unittest.TestCase):
     def test_same_size_edit_is_caught(self):
         (self.dir / "R6MatchStats.exe").write_bytes(b"MZ bad")  # same length as before
         self.assertEqual(self.check.verify(), ["changed file: R6MatchStats.exe"])
+
+    @unittest.skipUnless(sys.platform == "win32", "junctions are a Windows feature")
+    def test_a_planted_junction_is_reported_not_followed(self):
+        elsewhere = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, elsewhere, ignore_errors=True)
+        (elsewhere / "payload.dll").write_bytes(b"MZ")
+        junction = self.dir / "_internal" / "plugins"
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(elsewhere)], check=True, capture_output=True)
+        self.addCleanup(os.rmdir, junction)  # removes the junction only, not what it points to
+        self.assertEqual(self.check.verify(), ["unexpected file: _internal/plugins"])
 
     def test_missing_manifest(self):
         self.check.manifest.unlink()

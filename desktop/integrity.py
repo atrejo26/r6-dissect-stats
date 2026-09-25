@@ -21,7 +21,9 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import json
+import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 MANIFEST = "_internal/manifest.json"
@@ -34,19 +36,42 @@ class AppIntegrity:
         self.app_dir = Path(app_dir)
         self.manifest = self.app_dir / MANIFEST
 
-    def _files(self):
-        for path in sorted(self.app_dir.rglob("*")):
-            if path.is_file() and path != self.manifest:
-                yield path.relative_to(self.app_dir).as_posix(), path
+    def _files(self) -> list[tuple[str, Path, int]]:
+        """(path relative to the app folder, path, size) of everything but folders and the
+        manifest, sorted. A link or junction counts as a file and is never followed, so a
+        planted one is reported too. os.scandir lists sizes along with the names (on
+        Windows, without a call per file)."""
+        found = []
+        dirs = [self.app_dir]
+        while dirs:
+            with os.scandir(dirs.pop()) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False) and not entry.is_junction():
+                        dirs.append(Path(entry.path))
+                        continue
+                    path = Path(entry.path)
+                    if path != self.manifest:
+                        rel = path.relative_to(self.app_dir).as_posix()
+                        found.append((rel, path, entry.stat(follow_symlinks=False).st_size))
+        return sorted(found)
 
     @staticmethod
     def _sha256(path: Path) -> str:
         with open(path, "rb") as f:
             return hashlib.file_digest(f, "sha256").hexdigest()
 
+    @classmethod
+    def _sha256_all(cls, paths: list[Path]) -> list[str]:
+        """Hashes in the same order, several files at a time: hashlib releases the GIL
+        while hashing, so this makes the check at every app start several times faster."""
+        with ThreadPoolExecutor() as pool:
+            return list(pool.map(cls._sha256, paths))
+
     def create(self) -> int:
         """Write the manifest for the folder as it is now; returns how many files it lists."""
-        files = {rel: {"size": path.stat().st_size, "sha256": self._sha256(path)} for rel, path in self._files()}
+        found = self._files()
+        digests = self._sha256_all([path for _, path, _ in found])
+        files = {rel: {"size": path.stat().st_size, "sha256": digest} for (rel, path, _), digest in zip(found, digests)}
         self.manifest.write_text(json.dumps({"files": files}, indent=1, sort_keys=True), encoding="utf-8")
         return len(files)
 
@@ -56,15 +81,24 @@ class AppIntegrity:
             expected = json.loads(self.manifest.read_text(encoding="utf-8"))["files"]
         except (OSError, ValueError, KeyError):
             return [f"the list of the app's files ({MANIFEST}) is missing or unreadable"]
+        found = self._files()
+
+        def listed_size(rel: str, path: Path, size: int) -> bool:
+            want = expected[rel]["size"]
+            return size == want or path.stat().st_size == want  # a listing's size can lag behind
+
+        # hash only the listed files that still have their listed size; a size change is enough
+        to_hash = [(rel, path) for rel, path, size in found if rel in expected and listed_size(rel, path, size)]
+        digests = dict(zip((rel for rel, _ in to_hash), self._sha256_all([path for _, path in to_hash])))
         problems = []
         seen = set()
-        for rel, path in self._files():
+        for rel, path, _ in found:
             seen.add(rel)
             want = expected.get(rel)
             if want is None:
                 if not any(fnmatch.fnmatch(rel, pattern) for pattern in ALLOWED_EXTRAS):
                     problems.append(f"unexpected file: {rel}")
-            elif path.stat().st_size != want["size"] or self._sha256(path) != want["sha256"]:
+            elif digests.get(rel) != want["sha256"]:
                 problems.append(f"changed file: {rel}")
         problems += [f"missing file: {rel}" for rel in sorted(set(expected) - seen)]
         return problems

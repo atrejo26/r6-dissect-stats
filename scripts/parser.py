@@ -307,6 +307,8 @@ def _stage_match_folder(paths: list[Path], folder: Path) -> Path:
         return parent
     for p in paths:
         dest = folder / p.name
+        if dest.exists():
+            continue  # the same round twice: keep the first, and never write through a hard link
         try:
             os.link(p, dest)
         except OSError:
@@ -436,15 +438,17 @@ def collect_rec_files(path: str | Path, workdir: Path, scanner: ReplayScanner | 
 
 def group_by_match(rec_paths: list[str]) -> dict[str, list[str]]:
     """Split .rec paths into matches: {"Match-2026-09-23_19-19-11-23660": [R01, R02, ...]}.
-    Round files are named <match>-R01.rec; anything else is grouped by its folder."""
-    groups: dict[str, list[str]] = defaultdict(list)
-    for rp in rec_paths:
+    Round files are named <match>-R01.rec; anything else is grouped by its folder. A round
+    found twice (a copy of the match folder inside another one) is kept once, from the
+    shallowest folder, so it's neither parsed nor counted twice."""
+    groups: dict[str, dict[str, str]] = defaultdict(dict)
+    for rp in sorted(rec_paths, key=lambda x: (len(Path(x).parts), x)):
         p = Path(rp)
         key = _ROUND_SUFFIX.sub("", p.stem)
         if key == p.stem:  # not a round file name: fall back to the folder
             key = p.parent.name or p.stem
-        groups[key].append(rp)
-    return {k: sorted(v, key=lambda x: Path(x).name) for k, v in sorted(groups.items())}
+        groups[key].setdefault(p.name, rp)
+    return {k: [v[name] for name in sorted(v)] for k, v in sorted(groups.items())}
 
 
 _SIEGE_REPLAYS = Path("Tom Clancy's Rainbow Six Siege") / "MatchReplay"

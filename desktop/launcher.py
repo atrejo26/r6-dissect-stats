@@ -205,7 +205,7 @@ SMOKE_TEST_JS = """(() => {
 def run_window(server: Server) -> int:
     import webview
 
-    webview.settings["ALLOW_DOWNLOADS"] = True  # the report's CSV and JSON buttons
+    webview.settings["ALLOW_DOWNLOADS"] = True  # the report's CSV, JSON and TXT buttons
     smoke_file = os.environ.get("R6_SMOKE_TEST")
     result = {"ok": False}
 

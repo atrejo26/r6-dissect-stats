@@ -3,6 +3,7 @@ Run from scripts/:  python -m unittest"""
 
 from __future__ import annotations
 
+import csv
 import io
 import tempfile
 import unittest
@@ -11,8 +12,10 @@ from pathlib import Path
 from unittest import mock
 
 import file_guard
-from metrics_engine import PRO_LEAGUE_COLUMNS, compute_match_metrics, pro_league_rows
-from parser import ReplayParseError, collect_rec_files, group_by_match, normalize_from_r6_dissect, save_uploads
+from metrics_engine import PRO_LEAGUE_COLUMNS, compute_match_metrics, leaderboard_rows, pro_league_rows, rows_csv
+from parser import (
+    ReplayParseError, _stage_match_folder, collect_rec_files, group_by_match, normalize_from_r6_dissect, save_uploads,
+)
 from file_guard import ReplayScanner
 from sample_data import SAMPLE_MATCH
 
@@ -105,6 +108,13 @@ class TestRoundStats(unittest.TestCase):
         self.assertAlmostEqual(mean, 100, delta=1)
         self.assertEqual(sum(p.kills for p in stats.values()), sum(p.deaths for p in stats.values()))
 
+    def test_rows_csv(self):
+        rows = leaderboard_rows(compute_match_metrics(SAMPLE_MATCH))
+        parsed = list(csv.DictReader(io.StringIO(rows_csv(rows))))
+        self.assertEqual(list(parsed[0]), list(rows[0]))  # same columns, same order
+        self.assertEqual(parsed, [{k: str(v) for k, v in r.items()} for r in rows])
+        self.assertEqual(rows_csv([]), "\r\n")
+
 
 # what real replays start with: the current format, and the older zstd-compressed one
 REC = b"dissect\x00" + bytes(2000)
@@ -129,6 +139,25 @@ class TestReplayFiles(unittest.TestCase):
             groups = group_by_match(recs)
             self.assertEqual(list(groups), ["Match-A", "Match-B"])
             self.assertEqual([Path(p).name for p in groups["Match-B"]], ["Match-B-R01.rec", "Match-B-R02.rec"])
+
+    def test_a_round_found_twice_is_kept_once(self):
+        # a copy of a match folder left inside another match's folder
+        top = ["MatchReplay/Match-B/Match-B-R01.rec", "MatchReplay/Match-B/Match-B-R02.rec"]
+        nested = ["MatchReplay/Match-A/Match-B/Match-B-R01.rec", "MatchReplay/Match-A/Match-B/Match-B-R02.rec"]
+        self.assertEqual(group_by_match(nested + top + ["MatchReplay/Match-A/Match-A-R01.rec"]),
+                         {"Match-A": ["MatchReplay/Match-A/Match-A-R01.rec"], "Match-B": top})
+
+    def test_staging_rounds_never_writes_to_a_replay(self):
+        with tempfile.TemporaryDirectory() as td:
+            a, b, stage = Path(td, "a"), Path(td, "b"), Path(td, "stage")
+            for folder, data in ((a, REC), (b, OLD_REC)):
+                folder.mkdir()
+                (folder / "M-R01.rec").write_bytes(data)
+            stage.mkdir()
+            self.assertEqual(_stage_match_folder([a / "M-R01.rec", b / "M-R01.rec"], stage), stage)
+            # stage/M-R01.rec is a hard link to a's file: copying b's over it would overwrite a's
+            self.assertEqual((a / "M-R01.rec").read_bytes(), REC)
+            self.assertEqual((b / "M-R01.rec").read_bytes(), OLD_REC)
 
     @staticmethod
     def upload(name: str, data: bytes) -> io.BytesIO:
