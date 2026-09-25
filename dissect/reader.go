@@ -15,23 +15,26 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+var playerIndicator = []byte{0x22, 0x07, 0x94, 0x9B, 0xDC}
+
 var strSep = []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 
 type Reader struct {
-	b                        []byte
-	offset                   int
-	queries                  [][]byte
-	listeners                [][]func(r *Reader) error
-	time                     float64 // in seconds
-	timeRaw                  string  // raw dissect format
-	lastDefuserPlayerIndex   int
-	planted                  bool
-	readPartial              bool // reads up to the player info packets
-	playersRead              int
-	lastKillerFromScoreboard string
-	Header                   Header        `json:"header"`
-	MatchFeedback            []MatchUpdate `json:"matchFeedback"`
-	Scoreboard               Scoreboard
+	b                      []byte
+	offset                 int
+	queries                [][]byte
+	listeners              [][]func(r *Reader) error
+	time                   float64 // in seconds
+	timeRaw                string  // raw dissect format
+	lastDefuserPlayerIndex int
+	planted                bool
+	readPartial            bool // reads up to the player info packets
+	playersRead            int
+	scoreboardEntities     map[string]*scoreboardEntity
+	scoreboardKills        []string      // killer usernames, one per scoreboard kill increment
+	Header                 Header        `json:"header"`
+	MatchFeedback          []MatchUpdate `json:"matchFeedback"`
+	Scoreboard             Scoreboard
 }
 
 // NewReader decompresses in using zstd and
@@ -57,7 +60,8 @@ func NewReader(in io.Reader) (r *Reader, err error) {
 	}
 	log.Debug().Int("size", len(r.b)).Send()
 	log.Debug().Str("season", r.Header.GameVersion).Int("code", r.Header.CodeVersion).Send()
-	r.Listen([]byte{0x22, 0x07, 0x94, 0x9B, 0xDC}, readPlayer)
+	r.Listen(playerIndicator, readPlayer)
+	r.Listen(scoreboardEntityIndicator, readScoreboardEntity)
 	r.Listen([]byte{0x22, 0xA9, 0x26, 0x0B, 0xE4}, readAtkOpSwap)
 	r.Listen([]byte{0xAF, 0x98, 0x99, 0xCA}, readSpawn)
 	if r.Header.CodeVersion >= Y8S1 {

@@ -8,14 +8,71 @@ Run with:  streamlit run app.py
 
 from __future__ import annotations
 
+import shutil
 import tempfile
+import zipfile
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
 from metrics_engine import compute_match_metrics, leaderboard_rows
-from parser import parse_replay, load_demo_match, r6_dissect_available, ReplayParseError, raw_shape_preview
+from parser import parse_match, load_demo_match, r6_dissect_available, ReplayParseError, raw_shape_preview
+
+if __name__ == "__main__":
+    from streamlit import runtime
+
+    if not runtime.exists():
+        # started with `python app.py` (e.g. VS Code's Run button) -- relaunch
+        # under `streamlit run` from the repo root, where .streamlit/config.toml lives
+        import os
+        import sys
+
+        from streamlit.web import cli as stcli
+
+        os.chdir(Path(__file__).resolve().parent.parent)
+        sys.argv = ["streamlit", "run", str(Path(__file__).resolve())]
+        sys.exit(stcli.main())
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+REPLAYS_DIR = REPO_ROOT / "replays"
+
+
+def _extract_zip_recs(zf: zipfile.ZipFile, dest_dir: Path) -> list[str]:
+    """Extract only the .rec files, flattened (zips usually wrap a match folder)."""
+    paths = []
+    for member in zf.infolist():
+        name = Path(member.filename).name
+        if member.is_dir() or not name.lower().endswith(".rec") or name.startswith("._"):
+            continue  # "._x.rec" are macOS resource forks, not replays
+        dest = dest_dir / name
+        with zf.open(member) as src, open(dest, "wb") as out:
+            shutil.copyfileobj(src, out)
+        paths.append(str(dest))
+    return paths
+
+
+def _collect_recs_from_path(p: Path, td: Path) -> list[str]:
+    if p.is_dir():
+        return sorted(str(f) for f in p.rglob("*.rec") if not f.name.startswith("._"))
+    if p.suffix.lower() == ".zip":
+        with zipfile.ZipFile(p) as zf:
+            return sorted(_extract_zip_recs(zf, td))
+    return [str(p)]
+
+
+def _collect_recs_from_uploads(uploaded, td: Path) -> list[str]:
+    paths = []
+    for up in uploaded:
+        if up.name.lower().endswith(".zip"):
+            with zipfile.ZipFile(up) as zf:
+                paths += _extract_zip_recs(zf, td)
+        else:
+            dest = td / Path(up.name).name
+            dest.write_bytes(up.getbuffer())
+            paths.append(str(dest))
+    return sorted(set(paths))
+
 
 st.set_page_config(page_title="R6 T1 Match Lab", page_icon="🎯", layout="wide")
 
@@ -58,9 +115,9 @@ div[data-testid="stMetricValue"] { color: var(--accent); }
 # ------------------------------------------------------------- sidebar ----
 with st.sidebar:
     st.markdown("### 🎯 R6 T1 Match Lab")
-    st.caption("Upload a `.rec` replay to generate a full T1-style performance report.")
+    st.caption("Upload a match's `.rec` replays (one per round), or a `.zip` of the match folder, to generate a full T1-style performance report.")
     if r6_dissect_available():
-        st.success("r6-dissect detected on PATH", icon="✅")
+        st.success("r6-dissect found", icon="✅")
     else:
         st.warning("r6-dissect not found — real .rec parsing is disabled. "
                     "See README for install steps, or use Demo Mode below.", icon="⚠️")
@@ -79,19 +136,66 @@ if demo_mode:
     match = load_demo_match()
     st.caption("Showing the bundled demo match. Turn off demo mode in the sidebar to upload a real `.rec` file.")
 else:
-    st.markdown('<div class="upload-zone">', unsafe_allow_html=True)
-    uploaded = st.file_uploader("Drop a .rec replay file here", type=["rec"], label_visibility="collapsed")
-    st.markdown('</div>', unsafe_allow_html=True)
+    source = st.radio(
+        "Replay source",
+        ["From the replays/ folder", "Upload in browser"],
+        horizontal=True,
+        help="Large uploads through the browser fail with HTTP 413 on GitHub Codespaces "
+             "(the port-forwarding proxy caps request size). Put big matches in replays/ instead.",
+    )
 
-    if uploaded is not None:
-        with st.spinner("Parsing replay..."):
-            try:
-                with tempfile.TemporaryDirectory() as td:
-                    tmp_path = Path(td) / uploaded.name
-                    tmp_path.write_bytes(uploaded.getbuffer())
-                    match, raw = parse_replay(str(tmp_path))
-            except ReplayParseError as e:
-                error = str(e)
+    picked = None  # (cache signature, loader returning a list of .rec paths inside a temp dir)
+    if source == "From the replays/ folder":
+        REPLAYS_DIR.mkdir(exist_ok=True)
+        choices = sorted(
+            [p for p in REPLAYS_DIR.iterdir()
+             if (p.is_dir() and any(p.rglob("*.rec"))) or p.suffix.lower() in (".zip", ".rec")],
+            key=lambda p: p.stat().st_mtime, reverse=True,
+        )
+        st.caption(
+            f"Drag a match folder or its `.zip` into `{REPLAYS_DIR.relative_to(REPO_ROOT)}/` "
+            "in the VS Code Explorer (no size limit), then pick it here."
+        )
+        if not choices:
+            st.info(f"No matches in `{REPLAYS_DIR}` yet.")
+        else:
+            chosen = st.selectbox("Match", choices, format_func=lambda p: p.name + ("/" if p.is_dir() else ""))
+            sig = ("path", str(chosen), chosen.stat().st_mtime)
+            picked = (sig, lambda td, c=chosen: _collect_recs_from_path(c, td))
+    else:
+        st.markdown('<div class="upload-zone">', unsafe_allow_html=True)
+        uploaded = st.file_uploader(
+            "Drop every .rec file from the match folder here (or a .zip of the folder)",
+            type=["rec", "zip"],
+            accept_multiple_files=True,
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
+        st.caption("On Codespaces, uploads over ~50 MB fail with HTTP 413; use the replays/ folder for those, "
+                   "or upload the round `.rec` files individually instead of one big zip.")
+        if uploaded:
+            sig = ("upload",) + tuple((u.name, u.size, u.file_id) for u in uploaded)
+            picked = (sig, lambda td, u=uploaded: _collect_recs_from_uploads(u, td))
+
+    if picked is not None:
+        sig, collect = picked
+        cached = st.session_state.get("parsed_match")
+        if cached and cached["sig"] == sig:
+            match, raw, parse_warnings = cached["result"]
+        else:
+            with st.spinner("Parsing match... long matches can take a minute."):
+                try:
+                    with tempfile.TemporaryDirectory() as td:
+                        rec_paths = collect(Path(td))
+                        if not rec_paths:
+                            raise ReplayParseError("No .rec files found.")
+                        match, raw, parse_warnings = parse_match(rec_paths)
+                    st.session_state["parsed_match"] = {"sig": sig, "result": (match, raw, parse_warnings)}
+                except (ReplayParseError, zipfile.BadZipFile) as e:
+                    error = str(e)
+        if match is not None:
+            for w in parse_warnings:
+                st.warning(w, icon="⚠️")
+            st.caption(f"Parsed {len(match['rounds'])} round(s).")
 
         if match is not None and sum(match["final_score"]) == 0 and not any(
             s.kills for s in compute_match_metrics(match).values()
@@ -145,25 +249,30 @@ st.markdown('</div>', unsafe_allow_html=True)
 st.subheader("Leaderboard")
 st.caption("Click a column header to sort. Select a player row for a round-by-round breakdown.")
 
-display_df = df.drop(columns=["Team"]).rename(columns={"Rating": "Rating ▼"})
-event = st.dataframe(
-    display_df,
-    use_container_width=True,
-    hide_index=True,
-    on_select="rerun",
-    selection_mode="single-row",
-)
-
 selected_player = None
-if event and event.selection and event.selection.get("rows"):
-    idx = event.selection["rows"][0]
-    selected_player = display_df.iloc[idx]["Player"]
+for team_idx, team_name in enumerate(team_names[:2]):
+    st.markdown(f"#### {team_name}")
+    team_df = df[df["Team"] == team_idx].drop(columns=["Team"]).rename(columns={"Rating": "Rating ▼"})
+    team_df = team_df.reset_index(drop=True)
+    if team_df.empty:
+        st.caption("No players found for this team.")
+        continue
+    event = st.dataframe(
+        team_df,
+        width="stretch",
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key=f"leaderboard_team_{team_idx}",
+    )
+    if event and event.selection and event.selection.get("rows"):
+        selected_player = team_df.iloc[event.selection["rows"][0]]["Player"]
 
-st.caption("Or pick a player directly:")
-cols = st.columns(5)
-for i, name in enumerate(stats.keys()):
-    if cols[i % 5].button(name, use_container_width=True, key=f"btn_{name}"):
-        selected_player = name
+    team_players = [s.name for s in stats.values() if s.team == team_idx]
+    cols = st.columns(5)
+    for i, name in enumerate(team_players):
+        if cols[i % 5].button(name, width="stretch", key=f"btn_{name}"):
+            selected_player = name
 
 
 @st.dialog("Round-by-round breakdown", width="large")

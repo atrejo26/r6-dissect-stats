@@ -62,15 +62,13 @@ func (r *Reader) roundEnd() {
 		r.Header.Teams[1].Won = !team0Won
 	}
 
+	r.fixKillersFromScoreboard()
+
 	for _, u := range r.MatchFeedback {
 		switch u.Type {
 		case Kill:
 			i := r.Header.Players[r.PlayerIndexByUsername(u.Target)].TeamIndex
 			deaths[i] = deaths[i] + 1
-			// fix killer username
-			if len(u.usernameFromScoreboard) > 0 {
-				u.Username = u.usernameFromScoreboard
-			}
 			break
 		case Death:
 			i := r.Header.Players[r.PlayerIndexByUsername(u.Username)].TeamIndex

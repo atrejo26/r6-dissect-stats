@@ -121,7 +121,8 @@ const (
 	KafeDostoyevskyY10  Map = 413845419788
 	LairY10             Map = 417890697769
 	NighthavenLabsY10   Map = 418119057546
-	ConsulateY10           Map = 418126004176
+	ConsulateY10        Map = 418126004176
+	VillaY10            Map = 409325881472
 
 	KilledOpponents  WinCondition = "KilledOpponents"
 	SecuredArea      WinCondition = "SecuredArea" // TODO
@@ -558,7 +559,10 @@ func (r *Reader) deriveTeamRoles() {
 		if p.Operator == Recruit {
 			continue
 		}
-		role := p.Operator.Role()
+		role, ok := p.Operator.LookupRole()
+		if !ok {
+			continue // operator newer than this build, try the next player
+		}
 		teamIndex := p.TeamIndex
 		oppositeTeamIndex := teamIndex ^ 1
 		if role == Attack {

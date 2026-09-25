@@ -137,8 +137,12 @@ func readPlayer(r *Reader) error {
 		DissectID: id,
 		uiID:      uiID,
 	}
-	if p.Operator != Recruit && p.Operator.Role() == Defense {
-		p.Spawn = r.Header.Site // We cannot detect the spawn here on defense
+	if p.Operator != Recruit {
+		if role, ok := p.Operator.LookupRole(); !ok {
+			log.Warn().Uint64("op", uint64(p.Operator)).Str("username", username).Msg("unknown operator role")
+		} else if role == Defense {
+			p.Spawn = r.Header.Site // We cannot detect the spawn here on defense
+		}
 	}
 	log.Debug().Str("username", username).
 		Int("teamIndex", teamIndex).

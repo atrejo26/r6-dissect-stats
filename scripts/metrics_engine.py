@@ -55,9 +55,9 @@ class RoundBreakdown:
     traded: bool = False
     planted: bool = False
     defused: bool = False
-    clutch: str | None = None  # e.g. "1v2"
+    clutch: str | None = None  # e.g. "1v2" -- clutch WON
+    clutch_attempt: str | None = None  # e.g. "1v3" -- left alone vs 1+ enemies, won or not
     headshots: int = 0
-    assists: int = 0
     kost: bool = False
 
     def summary(self) -> str:
@@ -143,11 +143,15 @@ def _process_round(rnd: dict, team_of: dict[str, int], stats: dict[str, PlayerSt
     round_num = rnd["round_num"]
     winner_team = rnd["winner_team"]
 
-    alive = {0: set(), 1: set()}
-    for name, t in team_of.items():
-        alive[t].add(name)
+    # only players present this round (leavers / late joiners in long matches);
+    # the demo data has no per-round roster, so it falls back to everyone.
+    present = [n for n in (rnd.get("players") or team_of) if n in team_of]
 
-    rb = {name: RoundBreakdown(round_num=round_num) for name in team_of}
+    alive = {0: set(), 1: set()}
+    for name in present:
+        alive[team_of[name]].add(name)
+
+    rb = {name: RoundBreakdown(round_num=round_num) for name in present}
     first_kill_seen = False
     kill_events = []       # (idx, time, killer, victim, headshot)
     death_meta = []        # (idx, time, victim, killer) for trade detection
@@ -210,11 +214,12 @@ def _process_round(rnd: dict, team_of: dict[str, int], stats: dict[str, PlayerSt
                 rb[victim].traded = True
                 break
 
-    # credit the clutch only if the clutch candidate's team actually won
-    # the round and that player survived to the end.
-    if clutch_candidate is not None and rb[clutch_candidate].survived:
-        if team_of[clutch_candidate] == winner_team:
-            size = min(max(clutch_size, 1), 5)
+    # every 1vX situation is an attempt; credit the win only if the clutch
+    # candidate's team actually won the round and that player survived.
+    if clutch_candidate is not None:
+        size = min(max(clutch_size, 1), 5)
+        rb[clutch_candidate].clutch_attempt = f"1v{size}"
+        if rb[clutch_candidate].survived and team_of[clutch_candidate] == winner_team:
             rb[clutch_candidate].clutch = f"1v{size}"
 
     # r6-dissect computes kills/deaths/assists/headshots/clutch size per
@@ -233,6 +238,7 @@ def _process_round(rnd: dict, team_of: dict[str, int], stats: dict[str, PlayerSt
             r.assists = auth["assists"]
             if auth["onevx"]:
                 r.clutch = f"1v{min(max(auth['onevx'], 1), 5)}"
+                r.clutch_attempt = r.clutch  # a won clutch was necessarily attempted at that size
 
     # finalize KOST + accumulate into overall stats
     for name, r in rb.items():

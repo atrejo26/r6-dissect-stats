@@ -26,6 +26,10 @@ app.py (Streamlit)    → upload zone, scorecard, sortable leaderboard,
 `sample_data.py` ships a hand-built 9-round demo match so you can run the
 whole dashboard with zero external dependencies and no real replay file.
 
+**Season-long stats:** `season_stats.py` (`StatsManager`) logs tracked
+players' per-round results into a SQLite database across a whole season,
+without ever double-counting a round. See [SEASON_STATS.md](SEASON_STATS.md).
+
 ## Why r6-dissect instead of a from-scratch binary parser
 
 The `.rec` format is undocumented by Ubisoft and has been reverse-engineered

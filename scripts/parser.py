@@ -33,10 +33,10 @@ JSON root:
          "operator": {"name": str, "id": int}, ...}
       ],
       "matchFeedback": [
-        {"type": "Kill"|"Death"|"DefuserPlantStart"|"DefuserPlantComplete"|
-                  "DefuserDisableStart"|"DefuserDisableComplete"|
-                  "LocateObjective"|"OperatorSwap"|"Battleye"|
-                  "PlayerLeave"|"Other",
+        {"type": {"name": "Kill"|"Death"|"DefuserPlantStart"|"DefuserPlantComplete"|
+                          "DefuserDisableStart"|"DefuserDisableComplete"|
+                          "LocateObjective"|"OperatorSwap"|"Battleye"|
+                          "PlayerLeave"|"Other", "id": int},
          "username": str, "target": str, "headshot": bool,
          "time": "M:SS", "timeInSeconds": float, "message": str}
       ],
@@ -52,9 +52,10 @@ per-round object shape inside a "rounds" list, plus a match-level "stats"
 summary:
     {"rounds": [ <round object as above>, ... ], "stats": [ PlayerMatchStats, ... ]}
 
-Notably: `map`, `matchType`, and `gamemode` are OBJECTS ({"name","id"}),
-not plain strings -- a naive `.get("map")` used as a display string will
-render the whole dict. This module extracts `.get("name")` from all three.
+Notably: `map`, `matchType`, `gamemode`, and each matchFeedback `type` are
+OBJECTS ({"name","id"}), not plain strings -- a naive `.get("map")` used as
+a display string will render the whole dict. This module extracts
+`.get("name")` from all four.
 
 `matchFeedback` is consumed in array order, which is r6-dissect's own
 chronological append order; `timeInSeconds` is kept only for display and
@@ -76,6 +77,8 @@ isn't installed, so the dashboard is runnable/demoable without it.
 from __future__ import annotations
 
 import json
+import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -87,27 +90,53 @@ class ReplayParseError(Exception):
     pass
 
 
-R6_DISSECT_BIN = shutil.which("r6-dissect")
+def _find_r6_dissect() -> str | None:
+    """Locate the CLI: $R6_DISSECT_BIN, then PATH, then the binary built at
+    this repo's root (`go build` there), then `go install`'s default dir."""
+    candidates = [
+        os.environ.get("R6_DISSECT_BIN"),
+        shutil.which("r6-dissect"),
+        str(Path(__file__).resolve().parent.parent / "r6-dissect"),
+        str(Path.home() / "go" / "bin" / "r6-dissect"),
+    ]
+    for c in candidates:
+        if c and Path(c).is_file() and os.access(c, os.X_OK):
+            return c
+    return None
+
+
+R6_DISSECT_BIN = _find_r6_dissect()
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")  # r6-dissect's log output is colorized
+
+# a full match is ~6-14 MB per round; allow generous time per round file
+_SECONDS_PER_ROUND = 60
 
 
 def r6_dissect_available() -> bool:
     return R6_DISSECT_BIN is not None
 
 
-def _run_r6_dissect(rec_path: Path) -> dict[str, Any]:
-    """Shell out to the r6-dissect CLI and return its parsed JSON."""
+def _run_r6_dissect(rec_path: Path, num_rounds: int = 1) -> dict[str, Any]:
+    """Shell out to the r6-dissect CLI and return its parsed JSON. `rec_path`
+    may be a single .rec file or a folder of them (a whole match)."""
     if not r6_dissect_available():
         raise ReplayParseError(
-            "r6-dissect executable not found on PATH. Install it from "
-            "https://github.com/redraskal/r6-dissect (see README) or run "
-            "the app in demo mode."
+            "r6-dissect executable not found. Build it at the repo root with "
+            "`go build`, put it on PATH, or set R6_DISSECT_BIN to its path "
+            "(see README) -- or run the app in demo mode."
         )
     with tempfile.TemporaryDirectory() as td:
         out_path = Path(td) / "out.json"
         cmd = [R6_DISSECT_BIN, str(rec_path), "-o", str(out_path)]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        timeout = 60 + _SECONDS_PER_ROUND * num_rounds
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise ReplayParseError(f"r6-dissect timed out after {timeout}s on {rec_path.name}.")
         if proc.returncode != 0:
-            raise ReplayParseError(f"r6-dissect failed: {proc.stderr.strip()}")
+            label = rec_path.name if rec_path.is_file() else "the match folder"
+            raise ReplayParseError(f"r6-dissect failed on {label}: {_ANSI.sub('', proc.stderr).strip()}")
         if not out_path.exists():
             raise ReplayParseError("r6-dissect produced no output file.")
         return json.loads(out_path.read_text())
@@ -122,6 +151,15 @@ def _extract_name(field: Any, default: str = "") -> str:
     return default
 
 
+def _display_map_name(name: str) -> str:
+    """r6-dissect names reworked maps with a season suffix and no spaces
+    ("VillaY10", "KafeDostoyevsky") -> "Villa", "Kafe Dostoyevsky"."""
+    if name.startswith("Map("):  # unknown map id, newer than the r6-dissect build
+        return name
+    name = re.sub(r"Y\d+$", "", name)
+    return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", name)
+
+
 def _normalize_round(rs: dict[str, Any], idx: int) -> dict[str, Any]:
     teams = rs.get("teams") or [{}, {}]
     winner_team = 0
@@ -134,7 +172,7 @@ def _normalize_round(rs: dict[str, Any], idx: int) -> dict[str, Any]:
 
     events: list[dict[str, Any]] = []
     for fb in rs.get("matchFeedback") or []:
-        ftype = fb.get("type")
+        ftype = _extract_name(fb.get("type"))  # serialized as {"name": ..., "id": ...}
         t = fb.get("timeInSeconds", 0.0)
         if ftype == "Kill":
             killer, victim = fb.get("username"), fb.get("target")
@@ -175,6 +213,8 @@ def _normalize_round(rs: dict[str, Any], idx: int) -> dict[str, Any]:
 
     return {
         "round_num": rs.get("roundNumber", idx + 1),
+        # who was actually in this round -- players leave/rejoin in long matches
+        "players": [p["username"] for p in (rs.get("players") or []) if p.get("username")],
         "winner_team": winner_team,
         "win_condition": win_condition,
         "site": rs.get("site", ""),
@@ -220,7 +260,7 @@ def normalize_from_r6_dissect(raw: dict[str, Any]) -> dict[str, Any]:
             sum(1 for r in rounds if r["winner_team"] == 1),
         ]
 
-    map_name = _extract_name(round_sources[0].get("map") if round_sources else None, "Unknown Map")
+    map_name = _display_map_name(_extract_name(round_sources[0].get("map") if round_sources else None, "Unknown Map"))
     match_id = round_sources[0].get("matchID", "unknown") if round_sources else "unknown"
 
     return {
@@ -244,6 +284,45 @@ def parse_replay(rec_file_path: str) -> tuple[dict[str, Any], dict[str, Any]]:
     return normalize_from_r6_dissect(raw), raw
 
 
+def parse_match(rec_paths: list[str]) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+    """Parse a whole match (one .rec per round) -> (MatchData, raw JSON,
+    warnings). The files are handed to r6-dissect as one folder, which it
+    reads in filename order (R01, R02, ...). If a single corrupt/unsupported
+    round makes that fail, each round is parsed on its own instead and the
+    bad ones are skipped, so one broken file doesn't lose the whole match."""
+    paths = [Path(p) for p in rec_paths]
+    missing = [str(p) for p in paths if not p.exists()]
+    if missing:
+        raise ReplayParseError(f"File(s) not found: {', '.join(missing)}")
+    if not paths:
+        raise ReplayParseError("No .rec files to parse.")
+    if len(paths) == 1:
+        match, raw = parse_replay(str(paths[0]))
+        return match, raw, []
+
+    warnings: list[str] = []
+    with tempfile.TemporaryDirectory() as td:
+        folder = Path(td)
+        for p in paths:
+            (folder / p.name).symlink_to(p.resolve())
+        try:
+            raw = _run_r6_dissect(folder, num_rounds=len(paths))
+            return normalize_from_r6_dissect(raw), raw, warnings
+        except ReplayParseError as e:
+            warnings.append(f"Whole-match parse failed, parsing rounds individually. ({e})")
+
+    rounds = []
+    for p in sorted(paths, key=lambda p: p.name):
+        try:
+            rounds.append(_run_r6_dissect(p))
+        except (ReplayParseError, json.JSONDecodeError) as e:
+            warnings.append(f"Skipped {p.name}: {e}")
+    if not rounds:
+        raise ReplayParseError("Every round failed to parse:\n" + "\n".join(warnings))
+    raw = {"rounds": rounds}
+    return normalize_from_r6_dissect(raw), raw, warnings
+
+
 def load_demo_match() -> dict[str, Any]:
     """Loads the bundled synthetic sample match (see sample_data.py)."""
     from sample_data import SAMPLE_MATCH
@@ -254,16 +333,21 @@ def raw_shape_preview(raw: dict[str, Any], max_items: int = 3) -> dict[str, Any]
     """Small, safe-to-render summary of the raw parser JSON for a debug
     panel -- top-level keys plus a peek at the first round's shape, so a
     schema mismatch can be diagnosed from the UI instead of a screenshot."""
-    is_multi = isinstance(raw.get("rounds"), list) and raw["rounds"]
+    is_multi = bool(isinstance(raw.get("rounds"), list) and raw["rounds"])
     first_round = raw["rounds"][0] if is_multi else raw
+    if not isinstance(first_round, dict):
+        first_round = {}
+    # r6-dissect can emit null for list fields, so `or []` rather than a .get() default
+    players = first_round.get("players") or []
+    feedback = first_round.get("matchFeedback") or []
     return {
         "top_level_keys": sorted(raw.keys()),
         "shape": "multi-round (folder)" if is_multi else "single-round (file)",
         "num_rounds": len(raw["rounds"]) if is_multi else 1,
-        "first_round_keys": sorted(first_round.keys()) if isinstance(first_round, dict) else None,
-        "map_field": first_round.get("map") if isinstance(first_round, dict) else None,
-        "num_players": len(first_round.get("players", [])) if isinstance(first_round, dict) else 0,
-        "num_matchFeedback": len(first_round.get("matchFeedback", [])) if isinstance(first_round, dict) else 0,
-        "sample_matchFeedback": (first_round.get("matchFeedback") or [])[:max_items] if isinstance(first_round, dict) else [],
-        "has_stats": bool(first_round.get("stats")) if isinstance(first_round, dict) else False,
+        "first_round_keys": sorted(first_round.keys()),
+        "map_field": first_round.get("map"),
+        "num_players": len(players),
+        "num_matchFeedback": len(feedback),
+        "sample_matchFeedback": feedback[:max_items],
+        "has_stats": bool(first_round.get("stats")),
     }
