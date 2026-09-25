@@ -12,8 +12,9 @@ League-style scoreboard**: one row per player, split by team, with the same
 It comes three ways, all with CSV/JSON export:
 
 - **a website** (`app.py`, a Streamlit app you can host for free),
-- **a Windows app** (`R6MatchStats.exe`, built from `desktop/`), no install
-  needed, which reads your replays straight from the game's folder,
+- **a Windows app** (`R6MatchStats-Setup.exe`, built from `desktop/`) with its
+  own window, Start menu and desktop shortcuts, which reads your replays
+  straight from the game's folder,
 - **a command-line tool** (`match_stats.py`).
 
 ## Quick start (Windows)
@@ -123,20 +124,25 @@ changing the Go parser. Every push to the branch redeploys the site.
 
 ### The Windows app (GitHub Releases)
 
-The **Windows app** workflow (`.github/workflows/windows-app.yaml`) builds
-`R6MatchStats-Windows.zip` and attaches it to every published release, which
-is where the website's download button points.
+The **Windows app** workflow (`.github/workflows/windows-app.yaml`) builds the
+installer (`R6MatchStats-Setup.exe`) and a portable zip, installs and opens
+the app on a Windows machine to check it works, and attaches both files to
+every published release. The website's download button points at the newest
+release that has the installer. Until there is one, the page says the app
+hasn't been published yet.
 
 1. On a fork, open the **Actions** tab once and enable workflows.
-2. Bump `APP_VERSION` in `scripts/app_info.py` and push.
-3. On GitHub, go to **Releases** > **Draft a new release**, create a tag like
-   `app-v1.0.0`, and click **Publish release**. About ten minutes later the zip
-   appears on the release.
+2. On GitHub, go to **Releases** > **Draft a new release**, create a tag like
+   `v1.1.0` (the app takes its version from the tag), and click **Publish
+   release**. About ten minutes later the installer appears on the release.
+
+The installed app's **Get the Windows app** page tells users when a newer
+release is out, and running the new installer updates the app in place.
 
 To build it on your own PC instead, run
 `powershell -ExecutionPolicy Bypass -File desktop\build.ps1`, then drag
-`dist\R6MatchStats-Windows.zip` onto a release. See
-[desktop/README.md](../desktop/README.md).
+`dist\R6MatchStats-Setup.exe` and `dist\R6MatchStats-Windows.zip` onto a
+release. See [desktop/README.md](../desktop/README.md).
 
 ## Architecture
 

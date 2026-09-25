@@ -34,7 +34,7 @@ if __name__ == "__main__":
 # for `streamlit run app.py`, which starts the server before this script runs
 quiet_windows_connection_resets()
 
-st.set_page_config(page_title=APP_NAME, page_icon="🎯", layout="wide")
+st.set_page_config(page_title=APP_NAME, page_icon=str(Path(__file__).with_name("icon.png")), layout="wide")
 
 # ---------------------------------------------------------------- styling --
 st.markdown("""

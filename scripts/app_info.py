@@ -8,20 +8,25 @@ plus where the app is running (public website, Windows app, or a source checkout
 from __future__ import annotations
 
 import ipaddress
+import json
 import logging
 import os
 import re
 import sys
+import urllib.request
 from pathlib import Path
 
+_HERE = Path(__file__).resolve().parent
+
 APP_NAME = "R6 Match Stats"
-APP_VERSION = "1.0.0"
+# the Windows build stamps the release's version (its tag without the "v") next to this file
+_stamped_version = _HERE / "version.txt"
+APP_VERSION = (_stamped_version.read_text().strip() if _stamped_version.is_file() else "") or "1.0.0"
 
 # the Windows app, as attached to each GitHub release by .github/workflows/windows-app.yaml
-WINDOWS_ASSET = "R6MatchStats-Windows.zip"
+WINDOWS_INSTALLER = "R6MatchStats-Setup.exe"
+WINDOWS_ZIP = "R6MatchStats-Windows.zip"  # the portable version: no install, run from any folder
 DEFAULT_REPO = "julio208920/r6-dissect"
-
-_HERE = Path(__file__).resolve().parent
 
 
 def github_repo() -> str:
@@ -45,7 +50,31 @@ def github_repo() -> str:
 
 GITHUB_REPO = github_repo()
 RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
-WINDOWS_DOWNLOAD_URL = f"{RELEASES_URL}/download/{WINDOWS_ASSET}"
+WINDOWS_DOWNLOAD_URL = f"{RELEASES_URL}/download/{WINDOWS_INSTALLER}"
+WINDOWS_ZIP_URL = f"{RELEASES_URL}/download/{WINDOWS_ZIP}"
+
+
+def latest_release(repo: str = GITHUB_REPO) -> dict | None:
+    """The newest published release that carries the Windows app, from the GitHub API:
+    {"version", "url", "installer", "zip"} (download links; "zip" may be None).
+    None if the repo has no such release yet. Raises OSError if GitHub can't be reached."""
+    request = urllib.request.Request(f"https://api.github.com/repos/{repo}/releases?per_page=20",
+                                     headers={"Accept": "application/vnd.github+json", "User-Agent": APP_NAME})
+    with urllib.request.urlopen(request, timeout=5) as response:
+        releases = json.load(response)
+    for release in releases:
+        if release.get("draft") or release.get("prerelease"):
+            continue
+        assets = {a["name"]: a["browser_download_url"] for a in release.get("assets", [])}
+        if WINDOWS_INSTALLER in assets:
+            return {"version": release["tag_name"].lstrip("vV"), "url": release["html_url"],
+                    "installer": assets[WINDOWS_INSTALLER], "zip": assets.get(WINDOWS_ZIP)}
+    return None
+
+
+def version_tuple(version: str) -> tuple[int, ...]:
+    """"1.10.2" -> (1, 10, 2), for comparing versions; non-numeric parts count as 0."""
+    return tuple(int(part) if part.isdigit() else 0 for part in re.split(r"[.+-]", version)[:3])
 
 
 def is_windows_app() -> bool:

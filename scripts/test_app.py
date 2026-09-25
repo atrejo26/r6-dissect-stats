@@ -3,11 +3,14 @@ Run from the repo root:  python -m unittest discover -s scripts"""
 
 from __future__ import annotations
 
+import io
+import json
 import os
 import unittest
 from pathlib import Path
 from unittest import mock
 
+import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 import app_info
@@ -57,14 +60,89 @@ class TestReportPage(unittest.TestCase):
         self.assertIn("Team Liquid", tables[0])
 
 
-class TestDownloadPage(unittest.TestCase):
-    def test_download_link(self):
-        at = run_app(R6_HOSTED="1")
+RELEASE = {"version": "9.9.0", "url": "https://github.com/o/r/releases/tag/v9.9.0",
+           "installer": "https://github.com/o/r/releases/download/v9.9.0/R6MatchStats-Setup.exe",
+           "zip": "https://github.com/o/r/releases/download/v9.9.0/R6MatchStats-Windows.zip"}
+
+
+def download_page(release, **env: str) -> AppTest:
+    """The download page, with GitHub's newest release mocked: a dict, None (no
+    release yet) or an OSError (GitHub unreachable)."""
+    st.cache_data.clear()
+    lookup = {"side_effect": release} if isinstance(release, Exception) else {"return_value": release}
+    with mock.patch.dict(os.environ, env), \
+            mock.patch.object(app_info, "is_loopback", return_value=True), \
+            mock.patch.object(app_info, "latest_release", **lookup), \
+            mock.patch.object(replay_parser, "find_replay_folders", return_value=[]):
+        at = AppTest.from_file(APP, default_timeout=60)
+        at.run()
         at.switch_page("download.py").run()
+    return at
+
+
+def links(at: AppTest) -> list[str]:
+    return [b.proto.url for b in at.get("link_button")]
+
+
+class TestDownloadPage(unittest.TestCase):
+    def test_links_to_the_newest_installer(self):
+        at = download_page(RELEASE, R6_HOSTED="1")
         self.assertFalse(at.exception)
-        links = [b.proto.url for b in at.get("link_button")]
-        self.assertIn(app_info.WINDOWS_DOWNLOAD_URL, links)
-        self.assertTrue(app_info.WINDOWS_DOWNLOAD_URL.endswith("/releases/latest/download/" + app_info.WINDOWS_ASSET))
+        self.assertEqual(links(at), [RELEASE["installer"]])
+        self.assertIn(RELEASE["zip"], " ".join(c.value for c in at.caption))
+
+    def test_no_release_yet_says_so_instead_of_a_broken_link(self):
+        at = download_page(None, R6_HOSTED="1")
+        self.assertFalse(at.exception)
+        self.assertEqual(len(at.warning), 1)
+        self.assertNotIn(app_info.WINDOWS_DOWNLOAD_URL, links(at))
+
+    def test_github_unreachable_falls_back_to_the_latest_release_link(self):
+        at = download_page(OSError("offline"), R6_HOSTED="1")
+        self.assertFalse(at.exception)
+        self.assertEqual(links(at), [app_info.WINDOWS_DOWNLOAD_URL])
+        self.assertTrue(app_info.WINDOWS_DOWNLOAD_URL.endswith("/releases/latest/download/" + app_info.WINDOWS_INSTALLER))
+
+    def test_windows_app_offers_a_newer_version(self):
+        at = download_page(RELEASE, R6_DESKTOP="1")
+        self.assertFalse(at.exception)
+        self.assertEqual(links(at), [RELEASE["installer"]])
+        self.assertIn("9.9.0", at.info[0].value)
+
+    def test_windows_app_up_to_date(self):
+        at = download_page({**RELEASE, "version": app_info.APP_VERSION}, R6_DESKTOP="1")
+        self.assertEqual(links(at), [])
+        self.assertEqual(len(at.info), 0)
+
+
+class TestLatestRelease(unittest.TestCase):
+    def fetch(self, releases):
+        response = mock.MagicMock()
+        response.__enter__.return_value = io.BytesIO(json.dumps(releases).encode())
+        with mock.patch("urllib.request.urlopen", return_value=response):
+            return app_info.latest_release("o/r")
+
+    @staticmethod
+    def release(tag, *assets, **flags):
+        return {"tag_name": tag, "html_url": f"https://github.com/o/r/releases/tag/{tag}", **flags,
+                "assets": [{"name": a, "browser_download_url": f"https://dl/{tag}/{a}"} for a in assets]}
+
+    def test_skips_releases_without_the_app_drafts_and_prereleases(self):
+        found = self.fetch([
+            self.release("v3.0.0", "R6MatchStats-Setup.exe", prerelease=True),
+            self.release("v2.1.0", "r6-dissect-windows-amd64.zip"),
+            self.release("v2.0.0", "R6MatchStats-Setup.exe", "R6MatchStats-Windows.zip"),
+        ])
+        self.assertEqual(found["version"], "2.0.0")
+        self.assertEqual(found["installer"], "https://dl/v2.0.0/R6MatchStats-Setup.exe")
+        self.assertEqual(found["zip"], "https://dl/v2.0.0/R6MatchStats-Windows.zip")
+
+    def test_no_releases(self):
+        self.assertIsNone(self.fetch([]))
+
+    def test_version_order(self):
+        self.assertGreater(app_info.version_tuple("1.10.0"), app_info.version_tuple("1.9.2"))
+        self.assertEqual(app_info.version_tuple("1.0"), (1, 0))
 
 
 class TestAppInfo(unittest.TestCase):
