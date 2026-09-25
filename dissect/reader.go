@@ -28,6 +28,9 @@ type Reader struct {
 	timeRaw                string  // raw dissect format
 	lastDefuserPlayerIndex int
 	planted                bool
+	defuserCountdownStart  int     // offset of the current plant/disable countdown's first packet, -1 if none
+	defuserCountdownLast   float64 // last countdown value, to spot a restarted countdown
+	readyStates            []readyState
 	readPartial            bool // reads up to the player info packets
 	playersRead            int
 	scoreboardEntities     map[string]*scoreboardEntity
@@ -49,6 +52,7 @@ func NewReader(in io.Reader) (r *Reader, err error) {
 	r = &Reader{
 		readPartial:            false,
 		lastDefuserPlayerIndex: -1,
+		defuserCountdownStart:  -1,
 	}
 	if chunkedCompression {
 		if err = r.readChunkedData(br); err != nil {
@@ -72,6 +76,7 @@ func NewReader(in io.Reader) (r *Reader, err error) {
 	}
 	r.Listen([]byte{0x59, 0x34, 0xE5, 0x8B, 0x04}, readMatchFeedback)
 	r.Listen([]byte{0x22, 0xA9, 0xC8, 0x58, 0xD9}, readDefuserTimer)
+	r.Listen(readyStateIndicator, readReadyState)
 	r.Listen([]byte{0xEC, 0xDA, 0x4F, 0x80}, readScoreboardScore)
 	r.Listen([]byte{0x4D, 0x73, 0x7F, 0x9E}, readScoreboardAssists)
 	r.Listen([]byte{0x1C, 0xD2, 0xB1, 0x9D}, readScoreboardKills)

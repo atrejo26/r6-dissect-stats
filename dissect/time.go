@@ -129,7 +129,8 @@ func (r *Reader) winCondition(headerWinner int, planted, disabled bool, deaths, 
 	if roles[0] == Defense {
 		attackers, defenders = 1, 0
 	}
-	if disabled {
+	// once planted, defenders can only win by disabling the defuser
+	if disabled || (planted && headerWinner == defenders) {
 		return defenders, DisabledDefuser
 	}
 	if headerWinner > -1 {

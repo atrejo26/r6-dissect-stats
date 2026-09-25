@@ -67,9 +67,10 @@ Per-round `stats` are only used for assists (read from the scoreboard,
 which the kill feed can't provide); everything else is derived from
 `matchFeedback` so team kills and the round winner are handled one way.
 
-Newer replays (Y11S3) don't record who planted or disabled the defuser, so
-those events can arrive with no username; metrics_engine.py credits them
-only when exactly one player on the acting side was alive.
+Plant/defuse events name the player. Y11S3 replays don't say who it was
+directly, so r6-dissect works it out (see dissect/defuse.go); if it can't,
+the event arrives with no username and metrics_engine.py credits it only
+when exactly one player on the acting side was alive.
 
 `parse_match` takes the round files of one match; `collect_rec_files` and
 `group_by_match` turn a folder, a .zip, or a whole MatchReplay directory

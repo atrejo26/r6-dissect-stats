@@ -208,8 +208,8 @@ def _process_round(rnd: dict, team_of: dict[str, int], stats: dict[str, PlayerSt
                     alone[side] = (next(iter(alive[side])), len(alive[1 - side]))
 
         elif etype in ("plant", "defuse"):
-            # newer replays don't say who planted/defused; credit it only when
-            # exactly one player on the acting side was still alive
+            # r6-dissect names the player; if it couldn't, credit the plant/defuse
+            # only when exactly one player on the acting side was still alive
             if actor is None and attackers in (0, 1):
                 side = attackers if etype == "plant" else 1 - attackers
                 if len(alive[side]) == 1:

@@ -306,9 +306,7 @@ with st.expander("Stat definitions"):
         "**KPR**: kills per round. **HS**: headshot kills %. **SRV**: % of rounds survived.\n"
         "- **Clutches**: rounds won as the team's last player alive vs 1+ enemies. "
         "**Multikills**: rounds with 2+ kills.\n"
-        "- **Objectives**: defuser plants + disables. Recent Siege replays don't record who "
-        "planted or disabled the defuser, so it's only credited when a single player on that side "
-        "was alive.\n"
+        "- **Objectives**: defuser plants + disables.\n"
         "- **Dead for trade kill**: deaths a teammate avenged within 10 s. "
         "**Trade kills**: kills that avenged a teammate within 10 s."
     )
