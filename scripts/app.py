@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -32,7 +34,6 @@ if __name__ == "__main__":
         # started with `python app.py` (e.g. VS Code's Run button) -- relaunch
         # under `streamlit run` from the repo root, where .streamlit/config.toml lives
         import os
-        import sys
 
         from streamlit.web import cli as stcli
 
@@ -85,6 +86,21 @@ def _load_source(sig, collect) -> dict:
 
 
 st.set_page_config(page_title="R6 Match Stats", page_icon="🎯", layout="wide")
+
+
+@st.cache_resource(show_spinner=False)
+def _hide_connection_reset_noise() -> None:
+    """On Windows, asyncio logs a scary but harmless ConnectionResetError traceback
+    whenever a browser drops its connection (a refreshed or closed tab). Runs once
+    per server process."""
+    def keep(record: logging.LogRecord) -> bool:
+        return not (record.exc_info and isinstance(record.exc_info[1], ConnectionResetError))
+
+    logging.getLogger("asyncio").addFilter(keep)
+
+
+if sys.platform == "win32":
+    _hide_connection_reset_noise()
 
 # ---------------------------------------------------------------- styling --
 st.markdown("""
@@ -306,9 +322,7 @@ with st.expander("Stat definitions"):
         "**KPR**: kills per round. **HS**: headshot kills %. **SRV**: % of rounds survived.\n"
         "- **Clutches**: rounds won as the team's last player alive vs 1+ enemies. "
         "**Multikills**: rounds with 2+ kills.\n"
-        "- **Objectives**: defuser plants + disables. Recent Siege replays don't record who "
-        "planted or disabled the defuser, so it's only credited when a single player on that side "
-        "was alive.\n"
+        "- **Objectives**: defuser plants + disables.\n"
         "- **Dead for trade kill**: deaths a teammate avenged within 10 s. "
         "**Trade kills**: kills that avenged a teammate within 10 s."
     )

@@ -82,10 +82,12 @@ Team kills never count as kills, but the victim still gets a death.
 
 ### Known limitations
 
-- **Objectives:** replays from the current game version (Y11S3) no longer
-  record *who* planted or disabled the defuser, only that it happened. A
-  plant or disable is credited only when exactly one player on that side was
-  alive; otherwise it isn't credited to anyone. Older replays name the player.
+- **Objectives:** replays from the current game version (Y11S3) don't say
+  *who* planted or disabled the defuser. The parser works it out from which
+  player put their weapon away when the plant or disable started (see
+  `dissect/defuse.go`). Across 22 test matches this named a player on the
+  correct side for every plant and disable. If it can't tell, a plant is
+  credited only when a single player on that side was alive.
 - **EPS** is a close stand-in, not Ubisoft's exact number.
 - Rounds that ended without a score change (an abandoned match) have no
   winner, so they give no clutch.

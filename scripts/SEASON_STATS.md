@@ -97,7 +97,7 @@ adds up each tracked player's rounds:
 | entry kill / entry death | the round's first death: the victim gets the entry death, their killer the entry kill |
 | trade | the player's killer is killed by a teammate within 10 s |
 | clutch won / attempted (1v1–1v5) | a player left as their team's last alive against 1+ enemies; won if their team wins the round |
-| objective | plant (`DefuserPlantComplete`) or defuse (`DefuserDisableComplete`). Y11S3+ replays don't say who did it, so it's only credited when one player on that side was alive |
+| objective | plant (`DefuserPlantComplete`) or defuse (`DefuserDisableComplete`), credited to the player r6-dissect names (if it can't tell, to the only player on that side still alive) |
 | survived | not dead at round end |
 
 ### 3. The match ID must be unique
