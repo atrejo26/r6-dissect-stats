@@ -149,6 +149,6 @@ jobs:
           $notes = (gh release view $tag --json body --jq .body) -join "`n"
           if ($notes -notmatch '## Virus scan') {
             $scan = (Get-Content dist\VirusScan.txt | Select-Object -Skip 2) -join "`n"
-            "$notes`n`n## Virus scan`n`n``````n$scan`n``````" | Set-Content notes.md -Encoding utf8
+            "$notes`n`n## Virus scan`n`n```````n$scan`n``````" | Set-Content notes.md -Encoding utf8
             gh release edit $tag --notes-file notes.md
           }
