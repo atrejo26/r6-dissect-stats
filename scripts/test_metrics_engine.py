@@ -3,13 +3,16 @@ Run from scripts/:  python -m unittest"""
 
 from __future__ import annotations
 
+import io
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
+import parser as replay_parser
 from metrics_engine import PRO_LEAGUE_COLUMNS, compute_match_metrics, pro_league_rows
-from parser import collect_rec_files, group_by_match, normalize_from_r6_dissect
+from parser import ReplayParseError, collect_rec_files, group_by_match, normalize_from_r6_dissect, save_uploads
 from sample_data import SAMPLE_MATCH
 
 A = ["a1", "a2", "a3", "a4", "a5"]  # team 0
@@ -119,6 +122,38 @@ class TestReplayFiles(unittest.TestCase):
             groups = group_by_match(recs)
             self.assertEqual(list(groups), ["Match-A", "Match-B"])
             self.assertEqual([Path(p).name for p in groups["Match-B"]], ["Match-B-R01.rec", "Match-B-R02.rec"])
+
+    @staticmethod
+    def upload(name: str, data: bytes) -> io.BytesIO:
+        f = io.BytesIO(data)  # what Streamlit's UploadedFile is
+        f.name = name
+        return f
+
+    @staticmethod
+    def zip_bytes(files: dict[str, bytes]) -> bytes:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            for name, data in files.items():
+                zf.writestr(name, data)
+        return buf.getvalue()
+
+    def test_uploads(self):
+        zipped = self.zip_bytes({"Match-A/Match-A-R01.rec": b"x", "Match-B/Match-B-R01.rec": b"y"})
+        uploads = [self.upload("matches.zip", zipped), self.upload("Match-C-R01.rec", b"z"),
+                   self.upload("notes.txt", b"ignored")]
+        with tempfile.TemporaryDirectory() as td:
+            groups = group_by_match(save_uploads(uploads, Path(td)))
+            self.assertEqual(list(groups), ["Match-A", "Match-B", "Match-C"])
+            self.assertEqual(Path(groups["Match-C"][0]).read_bytes(), b"z")
+
+    def test_bad_and_oversized_zip_uploads(self):
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(ReplayParseError):
+                save_uploads([self.upload("broken.zip", b"not a zip")], Path(td))
+            big = self.zip_bytes({"Match-A/Match-A-R01.rec": b"x" * 100})
+            with mock.patch.object(replay_parser, "MAX_ZIP_REPLAY_BYTES", 50):
+                with self.assertRaisesRegex(ReplayParseError, "too large"):
+                    save_uploads([self.upload("big.zip", big)], Path(td))
 
 
 if __name__ == "__main__":

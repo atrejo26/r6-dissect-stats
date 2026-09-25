@@ -39,3 +39,7 @@
 __pycache__/
 *.pyc
 /.venv/
+
+# Windows app build (desktop/build.ps1)
+/build/
+/dist/

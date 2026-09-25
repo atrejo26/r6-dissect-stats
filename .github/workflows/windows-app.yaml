@@ -1,0 +1,36 @@
+name: Windows app
+
+# Builds R6MatchStats-Windows.zip with desktop/build.ps1 and attaches it to each
+# published release. The website's download button points at the latest one.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Build
+        shell: pwsh
+        run: ./desktop/build.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: R6MatchStats-Windows
+          path: dist/R6MatchStats-Windows.zip
+      - name: Attach to the release
+        if: github.event_name == 'release'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/R6MatchStats-Windows.zip --clobber

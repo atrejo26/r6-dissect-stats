@@ -14,16 +14,18 @@ Download the latest version here: https://github.com/redraskal/r6-dissect/releas
 match folder, the folder, or its `.rec` files) into an R6 Pro League-style
 scoreboard with 12 columns per player: EPS, KD (+/-), Entry, KOST, KPR, HS,
 SRV, Clutches, Multikills, Objectives, Dead for trade kill, and Trade kills.
-It runs as a web dashboard or a command-line tool:
+It runs as a website, a Windows app (no install needed), or a command-line tool:
 
 ```bash
 go build -o r6-dissect.exe .          # `go build` on macOS/Linux
 python -m venv .venv
 .venv\Scripts\python -m pip install -r scripts\requirements.txt
-.venv\Scripts\python -m streamlit run scripts\app.py
+.venv\Scripts\python scripts\app.py
 ```
 
-See [scripts/README.md](scripts/README.md) for details.
+See [scripts/README.md](scripts/README.md) for details, including how to
+publish the website (Streamlit Community Cloud) and the Windows app (GitHub
+Releases).
 
 ## Current Features
 - Match Info (Game version, map, gamemode, match type, teams, players)

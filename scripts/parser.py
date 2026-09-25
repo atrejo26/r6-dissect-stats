@@ -356,13 +356,18 @@ def _is_replay(name: str) -> bool:
     return name.lower().endswith(".rec") and not Path(name).name.startswith("._")
 
 
+# a full match is ~6-14 MB per round; anything far bigger isn't a match replay
+MAX_ZIP_REPLAY_BYTES = 4 * 1024**3
+
+
 def extract_zip_recs(zf: zipfile.ZipFile, dest_dir: Path) -> list[str]:
     """Extract only the .rec files, keeping each one's parent folder name so
     a zip holding several match folders doesn't mix their R01, R02, ... up."""
+    members = [m for m in zf.infolist() if not m.is_dir() and _is_replay(m.filename)]
+    if sum(m.file_size for m in members) > MAX_ZIP_REPLAY_BYTES:
+        raise ReplayParseError("That zip is too large to be match replays.")
     paths = []
-    for member in zf.infolist():
-        if member.is_dir() or not _is_replay(member.filename):
-            continue
+    for member in members:
         src = Path(member.filename)
         dest = dest_dir / (src.parent.name or "match") / src.name
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -370,6 +375,26 @@ def extract_zip_recs(zf: zipfile.ZipFile, dest_dir: Path) -> list[str]:
             shutil.copyfileobj(fsrc, out)
         paths.append(str(dest))
     return sorted(paths)
+
+
+def save_uploads(uploaded, workdir: Path) -> list[str]:
+    """.rec paths from uploaded files (Streamlit's UploadedFile, or any BytesIO with
+    a .name): zips are extracted like collect_rec_files does, .rec files are saved."""
+    paths = []
+    for up in uploaded:
+        name = Path(up.name).name
+        if name.lower().endswith(".zip"):
+            try:
+                with zipfile.ZipFile(up) as zf:
+                    paths += extract_zip_recs(zf, workdir / Path(name).stem)
+            except zipfile.BadZipFile as e:
+                raise ReplayParseError(f"{name} is not a valid zip file ({e}).") from e
+        elif _is_replay(name):
+            dest = workdir / "uploaded" / name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(up.getbuffer())
+            paths.append(str(dest))
+    return paths
 
 
 def collect_rec_files(path: str | Path, workdir: Path) -> list[str]:
@@ -402,6 +427,35 @@ def group_by_match(rec_paths: list[str]) -> dict[str, list[str]]:
             key = p.parent.name or p.stem
         groups[key].append(rp)
     return {k: sorted(v, key=lambda x: Path(x).name) for k, v in sorted(groups.items())}
+
+
+_SIEGE_REPLAYS = Path("Tom Clancy's Rainbow Six Siege") / "MatchReplay"
+
+
+def find_replay_folders() -> list[Path]:
+    """MatchReplay folders of Siege installs on this PC: every Steam library
+    (from Steam's libraryfolders.vdf) and Ubisoft Connect's default games folder."""
+    if sys.platform != "win32":
+        return []
+    candidates = []
+    for program_files in dict.fromkeys(filter(None, (os.environ.get("ProgramFiles(x86)"), os.environ.get("ProgramFiles")))):
+        steam = Path(program_files) / "Steam"
+        libraries = [steam]
+        vdf = steam / "steamapps" / "libraryfolders.vdf"
+        if vdf.is_file():
+            text = vdf.read_text(encoding="utf-8", errors="ignore")
+            libraries += [Path(p.replace("\\\\", "\\")) for p in re.findall(r'"path"\s+"([^"]+)"', text)]
+        candidates += [lib / "steamapps" / "common" / _SIEGE_REPLAYS for lib in libraries]
+        candidates.append(Path(program_files) / "Ubisoft" / "Ubisoft Game Launcher" / "games" / _SIEGE_REPLAYS)
+    found: list[Path] = []
+    for c in candidates:
+        if c.is_dir() and not any(c.samefile(f) for f in found):
+            found.append(c)
+
+    def latest_match(folder: Path) -> float:
+        return max((p.stat().st_mtime for p in folder.iterdir() if p.is_dir()), default=0.0)
+
+    return sorted(found, key=latest_match, reverse=True)  # most recently played first
 
 
 def load_demo_match() -> dict[str, Any]:

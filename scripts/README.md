@@ -9,8 +9,12 @@ League-style scoreboard**: one row per player, split by team, with the same
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | Player1 | 116 | 8-2 (+6) | 4-0 (+4) | 100% | 1.14 | 62% | 71% | 0 | 1 | 0 | 1 | 0 |
 
-It comes as a web dashboard (`app.py`) and a command-line tool
-(`match_stats.py`). Both can also export CSV/JSON.
+It comes three ways, all with CSV/JSON export:
+
+- **a website** (`app.py`, a Streamlit app you can host for free),
+- **a Windows app** (`R6MatchStats.exe`, built from `desktop/`), no install
+  needed, which reads your replays straight from the game's folder,
+- **a command-line tool** (`match_stats.py`).
 
 ## Quick start (Windows)
 
@@ -25,11 +29,10 @@ python -m venv .venv
 .venv\Scripts\python -m pip install -r scripts\requirements.txt
 
 # 3a. open the dashboard (http://localhost:8501)
-.venv\Scripts\python -m streamlit run scripts\app.py
+.venv\Scripts\python scripts\app.py
 
 # 3b. ...or print the scoreboard in the terminal
-cd scripts
-..\.venv\Scripts\python match_stats.py "C:\Users\you\Downloads\Match-2026-09-23_19-19-11-23660.zip"
+.venv\Scripts\python scripts\match_stats.py "C:\Users\you\Downloads\Match-2026-09-23_19-19-11-23660.zip"
 ```
 
 On macOS/Linux, use `go build` (it produces `r6-dissect`), `source
@@ -37,19 +40,25 @@ On macOS/Linux, use `go build` (it produces `r6-dissect`), `source
 
 ## Using the dashboard
 
-Pick a **Replay source**:
+The **Match report** page takes a **Replay source**:
 
+- **Folder or zip on this computer**: a path to one match folder, a `.zip`, or
+  your whole `MatchReplay` folder. It's filled in automatically when Siege is
+  installed through Steam (any library) or Ubisoft Connect, and the latest
+  match opens right away. With several matches you get a picker, and each
+  match is parsed only when you pick it.
 - **Upload**: drop the match's `.zip`, or every `.rec` file from the match folder.
-- **Folder or zip on this computer**: paste a path. This can be one match
-  folder, a `.zip`, or your whole `MatchReplay` folder
-  (`...\steamapps\common\Tom Clancy's Rainbow Six Siege\MatchReplay`). With
-  several matches you get a picker, and each match is parsed only when you pick it.
 - **From the replays/ folder**: copy matches into `replays/` at the repo
   root. Use this on GitHub Codespaces, where browser uploads over ~50 MB fail.
 
+On the public website only **Upload** is offered: folder paths would read the
+web server's disk, so they're only available to someone on the same computer
+as the app.
+
 Below the scoreboards you'll find CSV/JSON downloads and a round-by-round
 breakdown for each player. The **Use demo match** toggle loads a built-in
-sample match, so you can try the dashboard without a replay.
+sample match, so you can try the dashboard without a replay. The **Get the
+Windows app** page has the download button and install steps.
 
 ## Command line
 
@@ -92,6 +101,43 @@ Team kills never count as kills, but the victim still gets a death.
 - Rounds that ended without a score change (an abandoned match) have no
   winner, so they give no clutch.
 
+## Publishing
+
+### The website (Streamlit Community Cloud, free)
+
+Streamlit Community Cloud only deploys from a GitHub repo you're an admin of.
+If you aren't one, fork this repo first: the fork is yours, and the website's
+download button automatically points at the fork's releases.
+
+1. On GitHub, fork this repository to your account.
+2. Go to <https://share.streamlit.io>, sign in with GitHub, and choose
+   **Create app** > **Deploy a public app from GitHub**.
+3. Fill in: **Repository** `<you>/r6-dissect`, **Branch** the branch with
+   this code (for example `feat/pro-league-stats`), **Main file path**
+   `scripts/app.py`. Optionally pick a custom **App URL**.
+4. Under **Advanced settings**, choose Python 3.13, then click **Deploy**.
+
+It uses the Linux `r6-dissect` binary committed at the repo root, so rebuild
+and commit it (`GOOS=linux GOARCH=amd64 go build -o r6-dissect .`) after
+changing the Go parser. Every push to the branch redeploys the site.
+
+### The Windows app (GitHub Releases)
+
+The **Windows app** workflow (`.github/workflows/windows-app.yaml`) builds
+`R6MatchStats-Windows.zip` and attaches it to every published release, which
+is where the website's download button points.
+
+1. On a fork, open the **Actions** tab once and enable workflows.
+2. Bump `APP_VERSION` in `scripts/app_info.py` and push.
+3. On GitHub, go to **Releases** > **Draft a new release**, create a tag like
+   `app-v1.0.0`, and click **Publish release**. About ten minutes later the zip
+   appears on the release.
+
+To build it on your own PC instead, run
+`powershell -ExecutionPolicy Bypass -File desktop\build.ps1`, then drag
+`dist\R6MatchStats-Windows.zip` onto a release. See
+[desktop/README.md](../desktop/README.md).
+
 ## Architecture
 
 ```
@@ -104,8 +150,13 @@ r6-dissect (Go CLI, repo root)  →  JSON per round
 metrics_engine.compute_match_metrics  →  PlayerStats per player
    │  metrics_engine.pro_league_rows               (the 12 display columns)
    ▼
-app.py (Streamlit)  /  match_stats.py (CLI)
+app.py → report.py, download.py (Streamlit)  /  match_stats.py (CLI)
 ```
+
+`app.py` is the entry point: it sets up the page and the two pages
+(`report.py`, `download.py`). `app_info.py` holds the app name, version and
+download links, and tells whether it's running as the public website, the
+Windows app (`desktop/launcher.py`), or from a source checkout.
 
 `parser.py` finds the r6-dissect binary via `$R6_DISSECT_BIN`, then `PATH`,
 then `r6-dissect.exe` (Windows) or `r6-dissect` at the repo root, then
@@ -119,10 +170,8 @@ players' rounds into SQLite across a season without double-counting. See
 ## Tests
 
 ```bash
-cd scripts
-python -m unittest          # metrics engine, replay-file handling, season stats
-cd ..
-go test ./...               # the Go replay parser
+python -m unittest discover -s scripts   # metrics engine, pages, replay files, season stats
+go test ./...                            # the Go replay parser
 ```
 
 ## Troubleshooting
